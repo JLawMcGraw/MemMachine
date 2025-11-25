@@ -48,7 +48,7 @@ async def store_data(user_id: str, query: str):
 
 
 @app.get("/memory")
-async def get_data(query: str, user_id: str, timestamp: str):
+async def get_data(query: str, user_id: str, timestamp: str | None = None):
     try:
         session_data = {
             "group_id": user_id,
