@@ -334,7 +334,7 @@ class EpisodicMemory:
             delta.total_seconds() * 1000 + delta.microseconds / 1000
         )
         self._ingestion_counter.increment()
-        return True
+        return str(episode.uuid)
 
     async def close(self):
         """
@@ -373,6 +373,22 @@ class EpisodicMemory:
                 tasks.append(self._session_memory.clear_memory())
             if self._long_term_memory:
                 tasks.append(self._long_term_memory.forget_session())
+            await asyncio.gather(*tasks)
+            return
+
+    async def delete_episode_by_uuid(self, episode_uuid: str):
+        """
+        Delete a specific episode by its UUID from both short-term and long-term memory.
+
+        Args:
+            episode_uuid: UUID string of the episode to delete
+        """
+        async with self._lock:
+            tasks = []
+            if self._session_memory:
+                tasks.append(self._session_memory.delete_by_uuid(episode_uuid))
+            if self._long_term_memory:
+                tasks.append(self._long_term_memory.delete_by_uuid(episode_uuid))
             await asyncio.gather(*tasks)
             return
 

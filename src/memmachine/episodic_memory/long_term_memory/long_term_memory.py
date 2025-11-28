@@ -161,3 +161,13 @@ class LongTermMemory:
                 "session_id": self._session_id,
             }
         )
+
+    async def delete_by_uuid(self, episode_uuid: str):
+        """
+        Delete a specific episode by its UUID.
+
+        Args:
+            episode_uuid: UUID string of the episode to delete
+        """
+        import uuid as uuid_module
+        await self._declarative_memory.delete_by_uuid(uuid_module.UUID(episode_uuid))

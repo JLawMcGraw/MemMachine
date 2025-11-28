@@ -975,7 +975,7 @@ async def add_memory(
     """
     episode.merge_and_validate_session(session)
     episode.update_response_session_header(response)
-    await _add_memory(episode)
+    return await _add_memory(episode)
 
 
 async def _add_memory(episode: NewEpisode):
@@ -996,7 +996,7 @@ async def _add_memory(episode: NewEpisode):
     if inst is None:
         raise episode.new_404_not_found_error("unable to find episodic memory")
     async with AsyncEpisodicMemory(inst) as inst:
-        success = await inst.add_memory_episode(
+        uuid = await inst.add_memory_episode(
             producer=episode.producer,
             produced_for=episode.produced_for,
             episode_content=episode.episode_content,
@@ -1004,7 +1004,7 @@ async def _add_memory(episode: NewEpisode):
             content_type=ContentType.STRING,
             metadata=episode.metadata,
         )
-        if not success:
+        if not uuid:
             raise HTTPException(
                 status_code=400,
                 detail=f"""either {episode.producer} or {episode.produced_for}
@@ -1024,6 +1024,8 @@ async def _add_memory(episode: NewEpisode):
             },
             user_id=episode.producer,
         )
+
+        return {"uuid": uuid}
 
 
 @app.post("/v1/memories/episodic")
@@ -1051,7 +1053,7 @@ async def add_episodic_memory(
     """
     episode.merge_and_validate_session(session)
     episode.update_response_session_header(response)
-    await _add_episodic_memory(episode)
+    return await _add_episodic_memory(episode)
 
 
 async def _add_episodic_memory(episode: NewEpisode):
@@ -1073,7 +1075,7 @@ async def _add_episodic_memory(episode: NewEpisode):
     if inst is None:
         raise episode.new_404_not_found_error("unable to find episodic memory")
     async with AsyncEpisodicMemory(inst) as inst:
-        success = await inst.add_memory_episode(
+        uuid = await inst.add_memory_episode(
             producer=episode.producer,
             produced_for=episode.produced_for,
             episode_content=episode.episode_content,
@@ -1081,13 +1083,15 @@ async def _add_episodic_memory(episode: NewEpisode):
             content_type=ContentType.STRING,
             metadata=episode.metadata,
         )
-        if not success:
+        if not uuid:
             raise HTTPException(
                 status_code=400,
                 detail=f"""either {episode.producer} or {episode.produced_for}
                         is not in {session.user_id}
                         or {session.agent_id}""",
             )
+
+        return {"uuid": uuid}
 
 
 @app.post("/v1/memories/profile")
@@ -1334,6 +1338,42 @@ async def _delete_session_data(delete_req: DeleteDataRequest):
         raise delete_req.new_404_not_found_error("unable to find episodic memory")
     async with AsyncEpisodicMemory(inst) as inst:
         await inst.delete_data()
+
+
+@app.delete("/v1/memories/{uuid}")
+async def delete_episode_by_uuid(
+    uuid: str,
+    response: Response,
+    session: SessionData = Depends(_get_session_from_header),  # type: ignore
+):
+    """
+    Delete a specific memory episode by its UUID.
+
+    Args:
+        uuid: The UUID of the episode to delete
+        response: The HTTP response object to update headers
+        session: The session data from headers
+
+    Raises:
+        HTTPException: 404 if no matching episodic memory instance is found
+    """
+    inst: EpisodicMemory | None = await cast(
+        EpisodicMemoryManager, episodic_memory
+    ).get_episodic_memory_instance(
+        group_id=session.group_id,
+        agent_id=session.agent_id,
+        user_id=session.user_id,
+        session_id=session.session_id,
+    )
+    if inst is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unable to find episodic memory for session {session.session_id}"
+        )
+    async with AsyncEpisodicMemory(inst) as inst:
+        await inst.delete_episode_by_uuid(uuid)
+        response.status_code = 204  # No Content
+        return response
 
 
 @app.get("/metrics")

@@ -153,6 +153,37 @@ class SessionMemory:
             self._current_token_num = 0
             self._summary = ""
 
+    async def delete_by_uuid(self, episode_uuid: str):
+        """
+        Delete a specific episode from short-term memory by its UUID.
+
+        Args:
+            episode_uuid: UUID string of the episode to delete
+        """
+        import uuid as uuid_module
+        target_uuid = uuid_module.UUID(episode_uuid)
+
+        async with self._lock:
+            # Find and remove the episode with matching UUID
+            episodes_to_keep = []
+            found = False
+
+            for episode in self._memory:
+                if episode.uuid == target_uuid:
+                    # Found the episode to delete
+                    found = True
+                    self._current_episode_count -= 1
+                    self._current_message_len -= len(episode.content)
+                    self._current_token_num -= self._compute_token_num(episode)
+                else:
+                    episodes_to_keep.append(episode)
+
+            if found:
+                # Rebuild deque with episodes to keep
+                self._memory.clear()
+                for episode in episodes_to_keep:
+                    self._memory.append(episode)
+
     async def close(self):
         """Closes the memory, which currently just involves clearing it."""
         await self.clear_memory()

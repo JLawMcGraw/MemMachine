@@ -895,6 +895,68 @@ class DeclarativeMemory:
         node_uuids_to_delete = episode_uuids + episode_cluster_uuids + derivative_uuids
         await self._vector_graph_store.delete_nodes(node_uuids_to_delete)
 
+    async def delete_by_uuid(self, episode_uuid):
+        """
+        Delete a specific episode by its UUID, along with related clusters and derivatives.
+
+        Args:
+            episode_uuid (UUID): UUID of the episode to delete
+        """
+        from uuid import UUID
+
+        # Search for the specific episode node by UUID
+        matching_episode_nodes = await self._vector_graph_store.search_matching_nodes(
+            required_labels={self._episode_collection},
+            required_properties={},  # No filter by properties
+        )
+
+        # Filter to the specific UUID (search_matching_nodes doesn't support UUID filtering)
+        episode_node = next((node for node in matching_episode_nodes if node.uuid == episode_uuid), None)
+
+        if episode_node is None:
+            # Episode not found - this is okay, might have been already deleted
+            return
+
+        # Find related episode cluster nodes
+        episode_cluster_nodes = await self._vector_graph_store.search_related_nodes(
+            node_uuid=episode_node.uuid,
+            allowed_relations={self._episode_cluster_episode_relation},
+            required_labels={self._episode_cluster_collection},
+            find_sources=True,
+            find_targets=False,
+        )
+
+        # Find related derivative nodes for each cluster
+        search_related_derivative_nodes_tasks = [
+            self._vector_graph_store.search_related_nodes(
+                node_uuid=cluster_node.uuid,
+                allowed_relations={self._derivative_episode_cluster_relation},
+                required_labels={self._derivative_collection},
+                find_sources=True,
+                find_targets=False,
+            )
+            for cluster_node in episode_cluster_nodes
+        ]
+
+        cluster_nodes_related_derivative_nodes = await asyncio.gather(
+            *search_related_derivative_nodes_tasks
+        )
+
+        # Flatten derivative nodes
+        derivative_nodes = [
+            derivative_node
+            for cluster_related_derivatives in cluster_nodes_related_derivative_nodes
+            for derivative_node in cluster_related_derivatives
+        ]
+
+        # Collect all UUIDs to delete
+        episode_uuids = [episode_node.uuid]
+        cluster_uuids = [node.uuid for node in episode_cluster_nodes]
+        derivative_uuids = [node.uuid for node in derivative_nodes]
+
+        node_uuids_to_delete = episode_uuids + cluster_uuids + derivative_uuids
+        await self._vector_graph_store.delete_nodes(node_uuids_to_delete)
+
     @staticmethod
     def _episodes_from_episode_nodes(
         episode_nodes: list[Node],
