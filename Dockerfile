@@ -80,4 +80,4 @@ RUN python -c "import nltk; nltk.download('punkt_tab'); nltk.download('stopwords
 
 EXPOSE 8080
 ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["sh", "-c", "memmachine-sync-profile-schema && memmachine-server"]
+CMD ["memmachine-server"]
