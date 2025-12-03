@@ -19,7 +19,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.15 /uv /uvx /usr/local/bin/
 WORKDIR /app
 
 # Copy dependency files
-COPY MemMachine/pyproject.toml MemMachine/uv.lock ./
+COPY memmachine/pyproject.toml memmachine/uv.lock ./
 
 # Determine whether to include GPU dependencies
 ARG GPU="false"
@@ -33,7 +33,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi
 
 # Copy the application source code
-COPY MemMachine /app
+COPY memmachine /app
 
 # Copy the Docker-specific config template and entrypoint
 COPY alchemix/docker/memmachine/config.yaml.template /app/config.yaml.template
