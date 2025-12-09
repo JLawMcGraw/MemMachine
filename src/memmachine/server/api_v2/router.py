@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Response
+from fastapi import APIRouter, Depends, FastAPI, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from memmachine import MemMachine
@@ -12,6 +12,7 @@ from memmachine.common.errors import (
     ResourceNotFoundError,
 )
 from memmachine.main.memmachine import ALL_MEMORY_TYPES, MemoryType
+from memmachine.server.api_v2.doc import RouterDoc
 from memmachine.server.api_v2.service import (
     _add_messages_to,
     _search_target_memories,
@@ -25,10 +26,12 @@ from memmachine.server.api_v2.spec import (
     DeleteEpisodicMemorySpec,
     DeleteProjectSpec,
     DeleteSemanticMemorySpec,
+    EpisodeCountResponse,
     GetProjectSpec,
     ListMemoriesSpec,
     ProjectConfig,
     ProjectResponse,
+    RestError,
     SearchMemoriesSpec,
     SearchResult,
 )
@@ -36,7 +39,7 @@ from memmachine.server.api_v2.spec import (
 router = APIRouter()
 
 
-@router.post("/projects", status_code=201)
+@router.post("/projects", status_code=201, description=RouterDoc.CREATE_PROJECT)
 async def create_project(
     spec: CreateProjectSpec,
     memmachine: Annotated[MemMachine, Depends(get_memmachine)],
@@ -54,16 +57,12 @@ async def create_project(
             reranker_name=spec.config.reranker,
         )
     except InvalidArgumentError as e:
-        raise HTTPException(
-            status_code=422, detail="invalid argument: " + str(e)
-        ) from e
+        raise RestError(code=422, message="invalid argument: " + str(e)) from e
     except ConfigurationError as e:
-        raise HTTPException(
-            status_code=500, detail="configuration error: " + str(e)
-        ) from e
+        raise RestError(code=500, message="configuration error: " + str(e), ex=e) from e
     except ValueError as e:
         if f"Session {session_data.session_key} already exists" == str(e):
-            raise HTTPException(status_code=409, detail="Project already exists") from e
+            raise RestError(code=409, message="Project already exists", ex=e) from e
         raise
     long_term = session.episode_memory_conf.long_term_memory
     return ProjectResponse(
@@ -77,12 +76,12 @@ async def create_project(
     )
 
 
-@router.post("/projects/get")
+@router.post("/projects/get", description=RouterDoc.GET_PROJECT)
 async def get_project(
     spec: GetProjectSpec,
     memmachine: Annotated[MemMachine, Depends(get_memmachine)],
 ) -> ProjectResponse:
-    """Get a project."""
+    """Retrieve a project."""
     session_data = _SessionData(
         org_id=spec.org_id,
         project_id=spec.project_id,
@@ -92,9 +91,9 @@ async def get_project(
             session_key=session_data.session_key
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Internal server error") from e
+        raise RestError(code=500, message="Internal server error", ex=e) from e
     if session_info is None:
-        raise HTTPException(status_code=404, detail="Project does not exist")
+        raise RestError(code=404, message="Project does not exist")
     long_term = session_info.episode_memory_conf.long_term_memory
     return ProjectResponse(
         org_id=spec.org_id,
@@ -107,7 +106,24 @@ async def get_project(
     )
 
 
-@router.post("/projects/list")
+@router.post("/projects/episode_count/get", description=RouterDoc.GET_EPISODE_COUNT)
+async def get_episode_count(
+    spec: GetProjectSpec,
+    memmachine: Annotated[MemMachine, Depends(get_memmachine)],
+) -> EpisodeCountResponse:
+    """Retrieve the episode count for a project."""
+    session_data = _SessionData(
+        org_id=spec.org_id,
+        project_id=spec.project_id,
+    )
+    try:
+        count = await memmachine.episodes_count(session_data=session_data)
+    except Exception as e:
+        raise RestError(code=500, message="Internal server error", ex=e) from e
+    return EpisodeCountResponse(count=count)
+
+
+@router.post("/projects/list", description=RouterDoc.LIST_PROJECTS)
 async def list_projects(
     memmachine: Annotated[MemMachine, Depends(get_memmachine)],
 ) -> list[dict[str, str]]:
@@ -124,7 +140,7 @@ async def list_projects(
     ]
 
 
-@router.post("/projects/delete", status_code=204)
+@router.post("/projects/delete", status_code=204, description=RouterDoc.DELETE_PROJECT)
 async def delete_project(
     spec: DeleteProjectSpec,
     memmachine: Annotated[MemMachine, Depends(get_memmachine)],
@@ -138,15 +154,13 @@ async def delete_project(
         await memmachine.delete_session(session_data)
     except ValueError as e:
         if f"Session {session_data.session_key} does not exist" == str(e):
-            raise HTTPException(status_code=404, detail="Project does not exist") from e
+            raise RestError(code=404, message="Project does not exist", ex=e) from e
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail="Unable to delete project, " + str(e)
-        ) from e
+        raise RestError(code=500, message="Unable to delete project", ex=e) from e
 
 
-@router.post("/memories")
+@router.post("/memories", description=RouterDoc.ADD_MEMORIES)
 async def add_memories(
     spec: AddMemoriesSpec,
     memmachine: Annotated[MemMachine, Depends(get_memmachine)],
@@ -158,7 +172,7 @@ async def add_memories(
     return AddMemoriesResponse(results=results)
 
 
-@router.post("/memories/episodic/add")
+@router.post("/memories/episodic/add", description=RouterDoc.ADD_EPISODIC_MEMORIES)
 async def add_episodic_memories(
     spec: AddMemoriesSpec,
     memmachine: Annotated[MemMachine, Depends(get_memmachine)],
@@ -170,7 +184,7 @@ async def add_episodic_memories(
     return AddMemoriesResponse(results=results)
 
 
-@router.post("/memories/semantic/add")
+@router.post("/memories/semantic/add", description=RouterDoc.ADD_SEMANTIC_MEMORIES)
 async def add_semantic_memories(
     spec: AddMemoriesSpec,
     memmachine: Annotated[MemMachine, Depends(get_memmachine)],
@@ -182,7 +196,7 @@ async def add_semantic_memories(
     return AddMemoriesResponse(results=results)
 
 
-@router.post("/memories/search")
+@router.post("/memories/search", description=RouterDoc.SEARCH_MEMORIES)
 async def search_memories(
     spec: SearchMemoriesSpec,
     memmachine: Annotated[MemMachine, Depends(get_memmachine)],
@@ -194,12 +208,10 @@ async def search_memories(
             target_memories=target_memories, spec=spec, memmachine=memmachine
         )
     except ValueError as e:
-        raise HTTPException(
-            status_code=422, detail="invalid argument: " + str(e)
-        ) from e
+        raise RestError(code=422, message="invalid argument", ex=e) from e
     except RuntimeError as e:
         if "No session info found for session" in str(e):
-            raise HTTPException(status_code=404, detail="Project does not exist") from e
+            raise RestError(code=404, message="Project does not exist", ex=e) from e
         raise
 
 
@@ -231,7 +243,7 @@ async def _list_target_memories(
     )
 
 
-@router.post("/memories/list")
+@router.post("/memories/list", description=RouterDoc.LIST_MEMORIES)
 async def list_memories(
     spec: ListMemoriesSpec,
     memmachine: Annotated[MemMachine, Depends(get_memmachine)],
@@ -240,7 +252,11 @@ async def list_memories(
     return await _list_target_memories(spec=spec, memmachine=memmachine)
 
 
-@router.post("/memories/episodic/delete", status_code=204)
+@router.post(
+    "/memories/episodic/delete",
+    status_code=204,
+    description=RouterDoc.DELETE_EPISODIC_MEMORY,
+)
 async def delete_episodic_memory(
     spec: DeleteEpisodicMemorySpec,
     memmachine: Annotated[MemMachine, Depends(get_memmachine)],
@@ -252,21 +268,23 @@ async def delete_episodic_memory(
                 org_id=spec.org_id,
                 project_id=spec.project_id,
             ),
-            episode_ids=[spec.episodic_id],
+            episode_ids=spec.get_ids(),
         )
     except ValueError as e:
-        raise HTTPException(
-            status_code=422, detail="invalid argument: " + str(e)
-        ) from e
+        raise RestError(code=422, message="invalid argument", ex=e) from e
     except ResourceNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise RestError(code=404, message=str(e), ex=e) from e
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail="Unable to delete episodic memory, " + str(e)
+        raise RestError(
+            code=500, message="Unable to delete episodic memory", ex=e
         ) from e
 
 
-@router.post("/memories/semantic/delete", status_code=204)
+@router.post(
+    "/memories/semantic/delete",
+    status_code=204,
+    description=RouterDoc.DELETE_SEMANTIC_MEMORY,
+)
 async def delete_semantic_memory(
     spec: DeleteSemanticMemorySpec,
     memmachine: Annotated[MemMachine, Depends(get_memmachine)],
@@ -274,27 +292,25 @@ async def delete_semantic_memory(
     """Delete semantic memories in a project."""
     try:
         await memmachine.delete_features(
-            feature_ids=[spec.semantic_id],
+            feature_ids=spec.get_ids(),
         )
     except ValueError as e:
-        raise HTTPException(
-            status_code=422, detail="invalid argument: " + str(e)
-        ) from e
+        raise RestError(code=422, message="invalid argument", ex=e) from e
     except ResourceNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise RestError(code=404, message=str(e), ex=e) from e
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail="Unable to delete semantic memory, " + str(e)
+        raise RestError(
+            code=500, message="Unable to delete semantic memory", ex=e
         ) from e
 
 
-@router.get("/metrics")
+@router.get("/metrics", description=RouterDoc.METRICS_PROMETHEUS)
 async def metrics() -> Response:
     """Expose Prometheus metrics endpoint."""
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
-@router.get("/health")
+@router.get("/health", description=RouterDoc.HEALTH_CHECK)
 async def health_check() -> dict[str, str]:
     """Health check endpoint for container orchestration."""
     try:
@@ -303,7 +319,7 @@ async def health_check() -> dict[str, str]:
             "service": "memmachine",
         }
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Service unhealthy: {e!s}") from e
+        raise RestError(code=503, message="Service unhealthy", ex=e) from e
 
 
 def load_v2_api_router(app: FastAPI) -> APIRouter:

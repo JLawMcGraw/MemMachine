@@ -1,5 +1,7 @@
 #
 # Stage 1: Builder
+# NOTE: This Dockerfile is designed to be built from AlcheMix docker-compose
+# with context: ../.. (parent of both alchemix/ and memmachine/ repos)
 #
 FROM python:3.12-slim-trixie AS builder
 
@@ -18,8 +20,11 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.15 /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 
-# Copy dependency files
+# Copy dependency files (paths relative to build context: parent of both repos)
 COPY memmachine/pyproject.toml memmachine/uv.lock ./
+COPY memmachine/packages/ packages/
+COPY memmachine/src/ src/
+COPY memmachine/README.md README.md
 
 # Determine whether to include GPU dependencies
 ARG GPU="false"
@@ -32,10 +37,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv sync --locked --no-install-project --no-editable --no-dev; \
     fi
 
-# Copy the application source code
-COPY memmachine /app
+# Copy the full application source code
+COPY memmachine/ /app/
 
-# Copy the Docker-specific config template and entrypoint
+# Copy the Docker-specific config template and entrypoint from AlcheMix
 COPY alchemix/docker/memmachine/config.yaml.template /app/config.yaml.template
 COPY alchemix/docker/memmachine/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
@@ -77,6 +82,9 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 # Download NLTK data and models
 RUN python -c "import nltk; nltk.download('punkt_tab'); nltk.download('stopwords')"
+
+# Set host to 0.0.0.0 to allow external access
+ENV HOST=0.0.0.0
 
 EXPOSE 8080
 ENTRYPOINT ["/app/entrypoint.sh"]
