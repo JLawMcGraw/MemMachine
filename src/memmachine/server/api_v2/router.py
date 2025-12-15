@@ -6,20 +6,8 @@ from fastapi import APIRouter, Depends, FastAPI, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from memmachine import MemMachine
-from memmachine.common.errors import (
-    ConfigurationError,
-    InvalidArgumentError,
-    ResourceNotFoundError,
-)
-from memmachine.main.memmachine import ALL_MEMORY_TYPES, MemoryType
-from memmachine.server.api_v2.doc import RouterDoc
-from memmachine.server.api_v2.service import (
-    _add_messages_to,
-    _search_target_memories,
-    _SessionData,
-    get_memmachine,
-)
-from memmachine.server.api_v2.spec import (
+from memmachine.common.api.doc import RouterDoc
+from memmachine.common.api.spec import (
     AddMemoriesResponse,
     AddMemoriesSpec,
     CreateProjectSpec,
@@ -34,6 +22,18 @@ from memmachine.server.api_v2.spec import (
     RestError,
     SearchMemoriesSpec,
     SearchResult,
+)
+from memmachine.common.errors import (
+    ConfigurationError,
+    InvalidArgumentError,
+    ResourceNotFoundError,
+)
+from memmachine.main.memmachine import ALL_MEMORY_TYPES
+from memmachine.server.api_v2.service import (
+    _add_messages_to,
+    _search_target_memories,
+    _SessionData,
+    get_memmachine,
 )
 
 router = APIRouter()
@@ -166,32 +166,10 @@ async def add_memories(
     memmachine: Annotated[MemMachine, Depends(get_memmachine)],
 ) -> AddMemoriesResponse:
     """Add memories to a project."""
+    # Use types from spec if provided, otherwise use all memory types
+    target_memories = spec.types if spec.types else ALL_MEMORY_TYPES
     results = await _add_messages_to(
-        target_memories=ALL_MEMORY_TYPES, spec=spec, memmachine=memmachine
-    )
-    return AddMemoriesResponse(results=results)
-
-
-@router.post("/memories/episodic/add", description=RouterDoc.ADD_EPISODIC_MEMORIES)
-async def add_episodic_memories(
-    spec: AddMemoriesSpec,
-    memmachine: Annotated[MemMachine, Depends(get_memmachine)],
-) -> AddMemoriesResponse:
-    """Add episodic memories to a project."""
-    results = await _add_messages_to(
-        target_memories=[MemoryType.Episodic], spec=spec, memmachine=memmachine
-    )
-    return AddMemoriesResponse(results=results)
-
-
-@router.post("/memories/semantic/add", description=RouterDoc.ADD_SEMANTIC_MEMORIES)
-async def add_semantic_memories(
-    spec: AddMemoriesSpec,
-    memmachine: Annotated[MemMachine, Depends(get_memmachine)],
-) -> AddMemoriesResponse:
-    """Add semantic memories to a project."""
-    results = await _add_messages_to(
-        target_memories=[MemoryType.Semantic], spec=spec, memmachine=memmachine
+        target_memories=target_memories, spec=spec, memmachine=memmachine
     )
     return AddMemoriesResponse(results=results)
 

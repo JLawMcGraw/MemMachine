@@ -88,7 +88,7 @@ class PromptConf(YamlSerializableMixin):
     """Prompt configuration for semantic memory contexts."""
 
     profile: list[str] = Field(
-        default=["profile_prompt", "writing_assistant_prompt"],
+        default=["profile_prompt", "writing_assistant_prompt", "coding_prompt"],
         description="The default prompts to use for semantic user memory",
     )
     role: list[str] = Field(
@@ -96,7 +96,7 @@ class PromptConf(YamlSerializableMixin):
         description="The default prompts to use for semantic role memory",
     )
     session: list[str] = Field(
-        default=[],
+        default=["profile_prompt"],
         description="The default prompts to use for semantic session memory",
     )
     episode_summary_system_prompt_path: str = Field(

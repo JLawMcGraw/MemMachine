@@ -1,8 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from memmachine.main.memmachine import MemoryType
-from memmachine.server.api_v2.spec import (
+from memmachine.common.api.spec import (
     DEFAULT_ORG_AND_PROJECT_ID,
     AddMemoriesResponse,
     AddMemoriesSpec,
@@ -21,6 +20,7 @@ from memmachine.server.api_v2.spec import (
     SearchResult,
     _is_valid_name,
 )
+from memmachine.main.memmachine import MemoryType
 
 
 @pytest.mark.parametrize(
@@ -28,11 +28,11 @@ from memmachine.server.api_v2.spec import (
     [
         "abc",
         "abc123",
-        "ABC_xyz-123",
+        "ABC:xyz-123",
         "你好世界",
         "テスト123",
         "안녕-세상",
-        "名字_123",
+        "名字:123",
         "中文-english_混合",
     ],
 )
@@ -50,11 +50,14 @@ def test_validate_no_slash_valid(value):
         "name@123",  # symbol
         "value!",  # symbol
         "中文 test",  # space
+        "",  # empty
     ],
 )
 def test_validate_no_slash_invalid(value):
-    with pytest.raises(InvalidNameError):
+    with pytest.raises(InvalidNameError) as exe_info:
         _is_valid_name(value)
+    message = f"found: '{value}'"
+    assert message in str(exe_info.value)
 
 
 def assert_pydantic_errors(exc_info, expected_checks: dict[str, str]):
@@ -140,6 +143,7 @@ def test_add_memory_spec():
 
     message = MemoryMessage(content="Test content", producer="test_producer")
     spec = AddMemoriesSpec(messages=[message])
+    assert spec.types == []
     assert spec.org_id == DEFAULT_ORG_AND_PROJECT_ID
     assert spec.project_id == DEFAULT_ORG_AND_PROJECT_ID
     assert spec.messages == [message]

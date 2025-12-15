@@ -10,7 +10,7 @@ class SpecDoc:
     The unique identifier of the organization.
 
     - Must not contain slashes (`/`).
-    - Must contain only letters, numbers, underscores, hyphens, and Unicode
+    - Must contain only letters, numbers, underscores, hyphens, colon, and Unicode
       characters (e.g., Chinese/Japanese/Korean). No slashes or other symbols
       are allowed.
 
@@ -28,7 +28,7 @@ class SpecDoc:
 
     - Must be unique within the organization.
     - Must not contain slashes (`/`).
-    - Must contain only letters, numbers, underscores, hyphens, and Unicode
+    - Must contain only letters, numbers, underscores, hyphens, colon, and Unicode
       characters (e.g., Chinese/Japanese/Korean). No slashes or other symbols
       are allowed.
 
@@ -205,8 +205,8 @@ class Examples:
     FILTER_MEM: ClassVar[list[str]] = [
         "metadata.user_id=123 AND metadata.session_id=abc",
     ]
-    MEMORY_TYPES: ClassVar[list[list[str]]] = [["Episodic", "Semantic"]]
-    MEMORY_TYPE_SINGLE: ClassVar[list[str]] = ["Episodic", "Semantic"]
+    MEMORY_TYPES: ClassVar[list[list[str]]] = [["episodic", "semantic"]]
+    MEMORY_TYPE_SINGLE: ClassVar[list[str]] = ["episodic", "semantic"]
     PAGE_SIZE: ClassVar[list[int]] = [50, 100]
     PAGE_NUM: ClassVar[list[int]] = [0, 1, 5, 10]
     EPISODIC_ID: ClassVar[list[str]] = ["123", "345"]
@@ -225,7 +225,7 @@ class RouterDoc:
     This endpoint creates a project under the specified organization using the
     provided identifiers and configuration. Both `org_id` and `project_id`
     follow the rules: no slashes; only letters, numbers, underscores,
-    hyphens, and Unicode characters.
+    hyphens, colon, and Unicode characters.
 
     Each project acts as an isolated memory namespace. All memories (episodes)
     inserted into a project belong exclusively to that project. Queries,
@@ -274,7 +274,7 @@ class RouterDoc:
     Returns a list of all projects accessible within the system. Each entry
     contains the project's organization ID and project ID. Identifiers follow
     the standard rules: no slashes; only letters, numbers, underscores,
-    hyphens, and Unicode characters.
+    hyphens, colon, and Unicode characters.
 
     Projects are isolated memory namespaces. Memories (episodes) belong
     exclusively to their project. All project operations, including queries and
@@ -296,8 +296,13 @@ class RouterDoc:
     """
 
     ADD_MEMORIES = """
-    Add memory messages to a project.  If not specified, the memory will be
-    added to all the sub-types (Episodic, Semantic).
+    Add memory messages to a project.
+
+    The `types` field in the request specifies which memory types to add to:
+    - If `types` is empty or not provided, memories are added to all types (Episodic and Semantic)
+    - If `types` only contains `"episodic"`, memories are added only to Episodic memory
+    - If `types` only contains `"semantic"`, memories are added only to Semantic memory
+    - If `types` contains both, memories are added to both types
 
     Each memory message represents a discrete piece of information to be stored
     in the project's memory system. Messages can include content, metadata,
@@ -309,14 +314,6 @@ class RouterDoc:
 
     The endpoint accepts a batch of messages to be added in a single request.
     """
-
-    ADD_EPISODIC_MEMORIES = """
-    Add episodic memory messages to a project.  Same as Add Memories but only adds
-    to the Episodic memory type."""
-
-    ADD_SEMANTIC_MEMORIES = """
-    Add semantic memory messages to a project.  Same as Add Memories but only adds
-    to the Semantic memory type."""
 
     SEARCH_MEMORIES = """
     Search memories within a project.

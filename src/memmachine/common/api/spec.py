@@ -9,8 +9,8 @@ import regex
 from fastapi import HTTPException
 from pydantic import AfterValidator, BaseModel, Field, model_validator
 
+from memmachine.common.api.doc import Examples, SpecDoc
 from memmachine.main.memmachine import MemoryType
-from memmachine.server.api_v2.doc import Examples, SpecDoc
 
 DEFAULT_ORG_AND_PROJECT_ID = "universal"
 
@@ -23,11 +23,10 @@ class InvalidNameError(ValueError):
 
 
 def _is_valid_name(v: str) -> str:
-    # Allow: Unicode letters, Unicode numbers, underscore, hyphen
-    if not regex.fullmatch(r"^[\p{L}\p{N}_-]+$", v):
+    if not regex.fullmatch(r"^[\p{L}\p{N}_:-]+$", v):
         raise InvalidNameError(
             "ID can only contain letters, numbers, underscore, hyphen, "
-            "or Unicode characters"
+            f"colon, or Unicode characters, found: '{v}'",
         )
     return v
 
@@ -285,6 +284,15 @@ class MemoryMessage(BaseModel):
 
 class AddMemoriesSpec(_WithOrgAndProj):
     """Specification model for adding memories."""
+
+    types: Annotated[
+        list[MemoryType],
+        Field(
+            default_factory=list,
+            description=SpecDoc.MEMORY_TYPES,
+            examples=Examples.MEMORY_TYPES,
+        ),
+    ]
 
     messages: Annotated[
         list[MemoryMessage],
