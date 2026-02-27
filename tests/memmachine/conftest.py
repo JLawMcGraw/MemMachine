@@ -1,13 +1,18 @@
 # conftest.py
 import os
+import shutil
+import subprocess
+from importlib.util import find_spec
 from unittest.mock import create_autospec
 
 import pytest
 import pytest_asyncio
 from neo4j import AsyncGraphDatabase
+from neo4j.exceptions import ServiceUnavailable
 from sqlalchemy import StaticPool
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from testcontainers.core.waiting_utils import wait_container_is_ready
 from testcontainers.neo4j import Neo4jContainer
 from testcontainers.postgres import PostgresContainer
 
@@ -33,6 +38,10 @@ from memmachine.common.language_model.openai_responses_language_model import (
     OpenAIResponsesLanguageModel,
     OpenAIResponsesLanguageModelParams,
 )
+from memmachine.semantic_memory.config_store.config_store_sqlalchemy import (
+    BaseSemanticConfigStore,
+    SemanticConfigStorageSqlAlchemy,
+)
 from memmachine.semantic_memory.storage.neo4j_semantic_storage import (
     Neo4jSemanticStorage,
 )
@@ -45,22 +54,31 @@ from tests.memmachine.semantic_memory.storage.in_memory_semantic_storage import 
 )
 
 
-def pytest_addoption(parser):
-    parser.addoption(
-        "--integration",
-        action="store_true",
-        default=False,
-        help="Run integration tests",
-    )
+def is_docker_available() -> bool:
+    """Check if Docker daemon is running and accessible."""
+    if not shutil.which("docker"):
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    else:
+        return result.returncode == 0
 
 
-def pytest_collection_modifyitems(config, items):
-    skip_integration = pytest.mark.skip(reason="need --integration option to run")
+requires_sentence_transformers = pytest.mark.skipif(
+    find_spec("sentence_transformers") is None,
+    reason="sentence_transformers not installed",
+)
 
-    if not config.getoption("--integration"):
-        for item in items:
-            if "integration" in item.keywords:
-                item.add_marker(skip_integration)
+requires_docker = pytest.mark.skipif(
+    not is_docker_available(),
+    reason="Docker is not available",
+)
 
 
 @pytest.fixture
@@ -254,10 +272,9 @@ def real_llm_model(request):
 
 
 @pytest.fixture(scope="session")
-def pg_container(pytestconfig):
-    if not pytestconfig.getoption("--integration"):
-        pytest.skip("need --integration option to start Postgres container")
-
+def pg_container():
+    if not is_docker_available():
+        pytest.skip("Docker is not available")
     with PostgresContainer("pgvector/pgvector:pg16") as container:
         yield container
 
@@ -337,13 +354,19 @@ async def in_memory_semantic_storage():
 
 
 @pytest.fixture(scope="session")
-def neo4j_container(pytestconfig):
-    if not pytestconfig.getoption("--integration"):
-        pytest.skip("need --integration option to start Neo4j container")
+def neo4j_container():
+    if not is_docker_available():
+        pytest.skip("Docker is not available")
+
+    class _Neo4jContainer(Neo4jContainer):
+        @wait_container_is_ready(ServiceUnavailable)
+        def _connect(self) -> None:
+            with self.get_driver() as driver:
+                driver.verify_connectivity()
 
     username = "neo4j"
     password = "password"
-    with Neo4jContainer(
+    with _Neo4jContainer(
         image="neo4j:5.23",
         username=username,
         password=password,
@@ -384,6 +407,21 @@ async def neo4j_semantic_storage(neo4j_driver):
 )
 def semantic_storage(request):
     return request.getfixturevalue(request.param)
+
+
+@pytest_asyncio.fixture
+async def semantic_config_storage(sqlalchemy_engine: AsyncEngine):
+    engine = sqlalchemy_engine
+    async with engine.begin() as conn:
+        await conn.run_sync(BaseSemanticConfigStore.metadata.create_all)
+
+    storage = SemanticConfigStorageSqlAlchemy(engine)
+    await storage.startup()
+
+    yield storage
+
+    async with engine.begin() as conn:
+        await conn.run_sync(BaseSemanticConfigStore.metadata.drop_all)
 
 
 @pytest_asyncio.fixture

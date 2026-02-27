@@ -52,6 +52,10 @@ class CountCachingEpisodeStorage(EpisodeStorage):
     async def startup(self) -> None:
         await self._wrapped.startup()
 
+    async def delete_all(self) -> None:
+        await self._wrapped.delete_all()
+        await self._clear_cache()
+
     async def add_episodes(
         self,
         session_key: str,
@@ -70,9 +74,9 @@ class CountCachingEpisodeStorage(EpisodeStorage):
 
     async def get_episode(
         self,
-        history_id: EpisodeIdT,
+        episode_id: EpisodeIdT,
     ) -> Episode | None:
-        return await self._wrapped.get_episode(history_id)
+        return await self._wrapped.get_episode(episode_id)
 
     async def get_episode_messages(
         self,

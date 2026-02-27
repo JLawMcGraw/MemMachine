@@ -23,7 +23,9 @@ async def run_mcp_http(host: str, port: int) -> None:
         )
         async with global_memory_lifespan():
             await uvicorn.Server(
-                uvicorn.Config(mcp.get_app(), host=host, port=int(port)),
+                uvicorn.Config(
+                    mcp.get_app(), host=host, port=int(port), ws="websockets-sansio"
+                ),
             ).serve()
     except Exception:
         logger.exception("MemMachine MCP HTTP server crashed")
@@ -54,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     # Validate host
     try:
         # Accept both IP and hostname
-        if args.host not in ("localhost",):
+        if args.host != "localhost":
             ipaddress.ip_address(args.host)
     except ValueError:
         parser.error(f"Invalid host: {args.host!r}")

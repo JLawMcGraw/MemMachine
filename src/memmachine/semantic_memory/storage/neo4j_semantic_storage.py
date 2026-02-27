@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from asyncio import Lock
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, LiteralString, cast
 
 import numpy as np
-from neo4j import AsyncDriver
+from neo4j import AsyncDriver, Query
 from neo4j.graph import Node as Neo4jNode
 from pydantic import InstanceOf
 
-from memmachine.common.data_types import FilterablePropertyValue
+from memmachine.common.data_types import FilterValue, PropertyValue
 from memmachine.common.episode_store import EpisodeIdT
 from memmachine.common.errors import InvalidArgumentError
 from memmachine.common.filter.filter_parser import (
@@ -28,8 +29,18 @@ from memmachine.common.filter.filter_parser import (
     FilterExpr,
 )
 from memmachine.common.filter.filter_parser import (
+    In as FilterIn,
+)
+from memmachine.common.filter.filter_parser import (
+    IsNull as FilterIsNull,
+)
+from memmachine.common.filter.filter_parser import (
+    Not as FilterNot,
+)
+from memmachine.common.filter.filter_parser import (
     Or as FilterOr,
 )
+from memmachine.common.neo4j_utils import coerce_datetime_to_timestamp
 from memmachine.semantic_memory.semantic_model import SemanticFeature, SetIdT
 from memmachine.semantic_memory.storage.storage_base import (
     FeatureIdT,
@@ -91,6 +102,10 @@ def _desanitize_identifier(value: str) -> str:
     return re.sub(r"_u([0-9A-Fa-f]+)_", _replace, value)
 
 
+def _neo4j_query(text: str) -> Query:
+    return Query(cast(LiteralString, text))
+
+
 class Neo4jSemanticStorage(SemanticStorage):
     """Concrete :class:`SemanticStorageBase` backed by Neo4j."""
 
@@ -105,7 +120,7 @@ class Neo4jSemanticStorage(SemanticStorage):
         owns_driver: bool = False,
     ) -> None:
         """Initialize the storage with a Neo4j driver."""
-        self._driver = driver
+        self._driver: AsyncDriver = driver
         self._owns_driver = owns_driver
         # Exposed for fixtures to know which backend is in use
         self.backend_name = "neo4j"
@@ -118,18 +133,22 @@ class Neo4jSemanticStorage(SemanticStorage):
 
     async def startup(self) -> None:
         await self._driver.execute_query(
-            """
-            CREATE CONSTRAINT set_history_unique IF NOT EXISTS
-            FOR (h:SetHistory)
-            REQUIRE (h.set_id, h.history_id) IS UNIQUE
-            """,
+            _neo4j_query(
+                """
+                CREATE CONSTRAINT set_history_unique IF NOT EXISTS
+                FOR (h:SetHistory)
+                REQUIRE (h.set_id, h.history_id) IS UNIQUE
+                """
+            ),
         )
         await self._driver.execute_query(
-            """
-            CREATE CONSTRAINT set_embedding_unique IF NOT EXISTS
-            FOR (s:SetEmbedding)
-            REQUIRE s.set_id IS UNIQUE
-            """,
+            _neo4j_query(
+                """
+                CREATE CONSTRAINT set_embedding_unique IF NOT EXISTS
+                FOR (s:SetEmbedding)
+                REQUIRE s.set_id IS UNIQUE
+                """
+            ),
         )
         await self._backfill_embedding_dimensions()
         await self._load_set_embedding_dimensions()
@@ -141,16 +160,22 @@ class Neo4jSemanticStorage(SemanticStorage):
             await self._driver.close()
 
     async def delete_all(self) -> None:
-        await self._driver.execute_query("MATCH (f:Feature) DETACH DELETE f")
-        await self._driver.execute_query("MATCH (h:SetHistory) DELETE h")
-        await self._driver.execute_query("MATCH (s:SetEmbedding) DELETE s")
+        await self._driver.execute_query(
+            _neo4j_query("MATCH (f:Feature) DETACH DELETE f")
+        )
+        await self._driver.execute_query(_neo4j_query("MATCH (h:SetHistory) DELETE h"))
+        await self._driver.execute_query(
+            _neo4j_query("MATCH (s:SetEmbedding) DELETE s")
+        )
         records, _, _ = await self._driver.execute_query(
-            """
-            SHOW VECTOR INDEXES
-            YIELD name
-            WHERE name STARTS WITH $prefix
-            RETURN name
-            """,
+            _neo4j_query(
+                """
+                SHOW VECTOR INDEXES
+                YIELD name
+                WHERE name STARTS WITH $prefix
+                RETURN name
+                """
+            ),
             prefix=self._VECTOR_INDEX_PREFIX,
         )
         for record in records:
@@ -158,9 +183,35 @@ class Neo4jSemanticStorage(SemanticStorage):
             index_name = record_data.get("name")
             if not index_name:
                 continue
-            await self._driver.execute_query(f"DROP INDEX {index_name} IF EXISTS")
+            await self._driver.execute_query(
+                _neo4j_query(f"DROP INDEX {index_name} IF EXISTS")
+            )
         self._vector_index_by_set.clear()
         self._set_embedding_dimensions.clear()
+
+    async def _drop_set_id_vector_index(self, set_id: SetIdT) -> None:
+        index_name = self._vector_index_name(set_id)
+        if index_name not in self._vector_index_creation_lock:
+            async with self._vector_global_lock:
+                self._vector_index_creation_lock.setdefault(index_name, Lock())
+
+        async with self._vector_index_creation_lock[index_name]:
+            self._vector_index_by_set.pop(set_id, None)
+            self._set_embedding_dimensions.pop(set_id, None)
+
+            await self._drop_index_if_named(index_name)
+            await self._driver.execute_query(
+                """
+                MATCH (s:SetEmbedding {set_id: $set_id})
+                DETACH DELETE s
+                """,
+                set_id=set_id,
+            )
+
+    async def reset_set_ids(self, set_ids: list[SetIdT]) -> None:
+        async with asyncio.TaskGroup() as tg:
+            for set_id in set_ids:
+                tg.create_task(self._drop_set_id_vector_index(set_id))
 
     async def add_feature(
         self,
@@ -182,23 +233,25 @@ class Neo4jSemanticStorage(SemanticStorage):
         metadata_json, metadata_props = self._prepare_metadata_storage(metadata)
 
         records, _, _ = await self._driver.execute_query(
-            f"""
-            CREATE (f:Feature:{set_label} {{
-                set_id: $set_id,
-                category_name: $category_name,
-                feature: $feature,
-                value: $value,
-                tag: $tag,
-                embedding: $embedding,
-                embedding_dimensions: $dimensions,
-                metadata_json: $metadata_json,
-                citations: [],
-                created_at_ts: $ts,
-                updated_at_ts: $ts
-            }})
-            SET f += $metadata_props
-            RETURN elementId(f) AS feature_id
-            """,
+            _neo4j_query(
+                f"""
+                CREATE (f:Feature:{set_label} {{
+                    set_id: $set_id,
+                    category_name: $category_name,
+                    feature: $feature,
+                    value: $value,
+                    tag: $tag,
+                    embedding: $embedding,
+                    embedding_dimensions: $dimensions,
+                    metadata_json: $metadata_json,
+                    citations: [],
+                    created_at_ts: $ts,
+                    updated_at_ts: $ts
+                }})
+                SET f += $metadata_props
+                RETURN elementId(f) AS feature_id
+                """
+            ),
             set_id=set_id,
             category_name=category_name,
             feature=feature,
@@ -269,7 +322,10 @@ class Neo4jSemanticStorage(SemanticStorage):
             query_parts.append("SET f += $metadata_props")
             params["metadata_props"] = metadata_props
             params["metadata_prefix"] = self._METADATA_PROP_PREFIX
-        await self._driver.execute_query("\n".join(query_parts), **params)
+        await self._driver.execute_query(
+            _neo4j_query("\n".join(query_parts)),
+            **params,
+        )
 
     def _target_dimensions(
         self,
@@ -364,11 +420,13 @@ class Neo4jSemanticStorage(SemanticStorage):
         load_citations: bool = False,
     ) -> SemanticFeature | None:
         records, _, _ = await self._driver.execute_query(
-            f"""
-            MATCH (f:Feature)
-            WHERE {self._feature_id_condition()}
-            RETURN f
-            """,
+            _neo4j_query(
+                f"""
+                MATCH (f:Feature)
+                WHERE {self._feature_id_condition()}
+                RETURN f
+                """
+            ),
             feature_id=str(feature_id),
         )
         if not records:
@@ -381,11 +439,13 @@ class Neo4jSemanticStorage(SemanticStorage):
             return
 
         await self._driver.execute_query(
-            f"""
-            MATCH (f:Feature)
-            WHERE {self._feature_ids_condition(param="ids")}
-            DETACH DELETE f
-            """,
+            _neo4j_query(
+                f"""
+                MATCH (f:Feature)
+                WHERE {self._feature_ids_condition(param="ids")}
+                DETACH DELETE f
+                """
+            ),
             ids=[str(fid) for fid in feature_ids],
         )
 
@@ -460,11 +520,13 @@ class Neo4jSemanticStorage(SemanticStorage):
         if not history_ids:
             return
         records, _, _ = await self._driver.execute_query(
-            f"""
-            MATCH (f:Feature)
-            WHERE {self._feature_id_condition()}
-            RETURN f.citations AS citations
-            """,
+            _neo4j_query(
+                f"""
+                MATCH (f:Feature)
+                WHERE {self._feature_id_condition()}
+                RETURN f.citations AS citations
+                """
+            ),
             feature_id=str(feature_id),
         )
         if not records:
@@ -473,12 +535,14 @@ class Neo4jSemanticStorage(SemanticStorage):
         for history_id in history_ids:
             existing.add(str(history_id))
         await self._driver.execute_query(
-            f"""
-            MATCH (f:Feature)
-            WHERE {self._feature_id_condition()}
-            SET f.citations = $citations,
-                f.updated_at_ts = $ts
-            """,
+            _neo4j_query(
+                f"""
+                MATCH (f:Feature)
+                WHERE {self._feature_id_condition()}
+                SET f.citations = $citations,
+                    f.updated_at_ts = $ts
+                """
+            ),
             feature_id=str(feature_id),
             citations=sorted(existing),
             ts=_utc_timestamp(),
@@ -506,7 +570,10 @@ class Neo4jSemanticStorage(SemanticStorage):
         if limit is not None:
             query.append("LIMIT $limit")
             params["limit"] = limit
-        records, _, _ = await self._driver.execute_query("\n".join(query), **params)
+        records, _, _ = await self._driver.execute_query(
+            _neo4j_query("\n".join(query)),
+            **params,
+        )
         return [EpisodeIdT(record["history_id"]) for record in records]
 
     async def get_history_messages_count(
@@ -527,7 +594,10 @@ class Neo4jSemanticStorage(SemanticStorage):
         if conditions:
             query.append("WHERE " + " AND ".join(conditions))
         query.append("RETURN count(*) AS cnt")
-        records, _, _ = await self._driver.execute_query("\n".join(query), **params)
+        records, _, _ = await self._driver.execute_query(
+            _neo4j_query("\n".join(query)),
+            **params,
+        )
         return int(records[0]["cnt"]) if records else 0
 
     async def get_history_set_ids(
@@ -542,13 +612,15 @@ class Neo4jSemanticStorage(SemanticStorage):
         if min_uningested_messages is not None and min_uningested_messages > 0:
             filters_applied = True
             records, _, _ = await self._driver.execute_query(
-                """
-                MATCH (h:SetHistory)
-                WITH h.set_id AS set_id,
-                     sum(CASE WHEN coalesce(h.is_ingested, false) = false THEN 1 ELSE 0 END) AS uningested_count
-                WHERE uningested_count >= $min_uningested_messages
-                RETURN set_id
-                """,
+                _neo4j_query(
+                    """
+                    MATCH (h:SetHistory)
+                    WITH h.set_id AS set_id,
+                         sum(CASE WHEN coalesce(h.is_ingested, false) = false THEN 1 ELSE 0 END) AS uningested_count
+                    WHERE uningested_count >= $min_uningested_messages
+                    RETURN set_id
+                    """
+                ),
                 min_uningested_messages=min_uningested_messages,
             )
             set_ids.update(
@@ -588,6 +660,25 @@ class Neo4jSemanticStorage(SemanticStorage):
             )
 
         return list(set_ids)
+
+    async def get_set_ids_starts_with(self, prefix: str) -> list[SetIdT]:
+        records, _, _ = await self._driver.execute_query(
+            """
+            MATCH (f:Feature)
+            WHERE f.set_id STARTS WITH $prefix
+            RETURN f.set_id AS set_id
+            UNION
+            MATCH (h:SetHistory)
+            WHERE h.set_id STARTS WITH $prefix
+            RETURN h.set_id AS set_id
+            """,
+            prefix=prefix,
+        )
+        return [
+            SetIdT(str(record["set_id"]))
+            for record in records
+            if record.get("set_id") is not None
+        ]
 
     async def add_history_to_set(self, set_id: str, history_id: EpisodeIdT) -> None:
         await self._driver.execute_query(
@@ -658,7 +749,10 @@ class Neo4jSemanticStorage(SemanticStorage):
         if conditions:
             query.append("WHERE " + " AND ".join(conditions))
         query.append("RETURN f")
-        records, _, _ = await self._driver.execute_query("\n".join(query), **params)
+        records, _, _ = await self._driver.execute_query(
+            _neo4j_query("\n".join(query)),
+            **params,
+        )
         return [self._node_to_entry(record["f"]) for record in records]
 
     def _node_to_entry(self, node: Neo4jNode) -> _FeatureEntry:
@@ -715,14 +809,14 @@ class Neo4jSemanticStorage(SemanticStorage):
             if raw_value is None:
                 continue
             prop_name = self._metadata_property_name(raw_key)
-            metadata_props[prop_name] = self._normalize_metadata_property_value(
+            metadata_props[prop_name] = self._normalize_property_value(
                 raw_value,
             )
         return metadata_json, metadata_props
 
     @staticmethod
-    def _normalize_metadata_property_value(
-        value: FilterablePropertyValue,
+    def _normalize_property_value(
+        value: PropertyValue,
     ) -> bool | int | float | str:
         if isinstance(value, bool):
             return value
@@ -870,7 +964,10 @@ class Neo4jSemanticStorage(SemanticStorage):
     ) -> list[tuple[float, _FeatureEntry]]:
         params = dict(params_base)
         params["index_name"] = index_name
-        records, _, _ = await self._driver.execute_query(query_text, **params)
+        records, _, _ = await self._driver.execute_query(
+            _neo4j_query(query_text),
+            **params,
+        )
         return [
             (float(record.get("score") or 0.0), self._node_to_entry(record["node"]))
             for record in records
@@ -907,27 +1004,16 @@ class Neo4jSemanticStorage(SemanticStorage):
         target_field: str,
     ) -> set[str] | None:
         if isinstance(expr, FilterComparison):
-            return self._collect_comparison_values(expr, target_field)
+            if expr.field != target_field or expr.op != "=":
+                return None
+            return {str(expr.value)}
+        if isinstance(expr, FilterIn):
+            if expr.field != target_field:
+                return None
+            return {str(v) for v in expr.values}
         if isinstance(expr, FilterAnd):
             return self._merge_and_values(expr, target_field)
-        if isinstance(expr, FilterOr):
-            # Ambiguous which branch applies; fall back to no restriction
-            return None
-        return None
-
-    def _collect_comparison_values(
-        self, expr: FilterComparison, target_field: str
-    ) -> set[str] | None:
-        if expr.field != target_field:
-            return None
-        if expr.op == "=":
-            if isinstance(expr.value, list):
-                raise ValueError("'=' comparison cannot accept list values")
-            return {str(expr.value)}
-        if expr.op == "in":
-            if not isinstance(expr.value, list):
-                raise ValueError("IN comparison requires list values")
-            return {str(v) for v in expr.value}
+        # Or, IsNull, Not cannot provide definite values
         return None
 
     def _merge_and_values(self, expr: FilterAnd, target_field: str) -> set[str] | None:
@@ -944,9 +1030,37 @@ class Neo4jSemanticStorage(SemanticStorage):
         alias: str,
         expr: FilterExpr,
     ) -> tuple[str, dict[str, Any]]:
+        if isinstance(expr, FilterIsNull):
+            field_ref, _ = self._resolve_field_reference(alias, expr.field)
+            return f"{field_ref} IS NULL", {}
+
+        if isinstance(expr, FilterIn):
+            field_ref, value_adapter = self._resolve_field_reference(
+                alias,
+                expr.field,
+            )
+            param = self._next_filter_param()
+            adapted_values = (
+                [self._adapt_filter_value(v, value_adapter) for v in expr.values]
+                if value_adapter is not None
+                else list(expr.values)
+            )
+            return f"{field_ref} IN ${param}", {param: adapted_values}
+
         if isinstance(expr, FilterComparison):
-            field_ref = self._resolve_field_reference(alias, expr.field)
-            return self._render_comparison_condition(field_ref, expr)
+            field_ref, value_adapter = self._resolve_field_reference(
+                alias,
+                expr.field,
+            )
+            param = self._next_filter_param()
+            adapted_value = (
+                self._adapt_filter_value(expr.value, value_adapter)
+                if value_adapter is not None
+                else expr.value
+            )
+            cypher_op = "<>" if expr.op == "!=" else expr.op
+            return f"{field_ref} {cypher_op} ${param}", {param: adapted_value}
+
         if isinstance(expr, FilterAnd):
             left_cond, left_params = self._render_filter_expr(alias, expr.left)
             right_cond, right_params = self._render_filter_expr(alias, expr.right)
@@ -959,54 +1073,52 @@ class Neo4jSemanticStorage(SemanticStorage):
             condition = f"({left_cond}) OR ({right_cond})"
             left_params.update(right_params)
             return condition, left_params
+        if isinstance(expr, FilterNot):
+            inner_cond, inner_params = self._render_filter_expr(alias, expr.expr)
+            condition = f"NOT ({inner_cond})"
+            return condition, inner_params
         raise TypeError(f"Unsupported filter expression type: {type(expr)!r}")
 
-    def _render_comparison_condition(
-        self, field_ref: str, expr: FilterComparison
-    ) -> tuple[str, dict[str, Any]]:
-        op = expr.op
-        params: dict[str, Any] = {}
-
-        if op == "in":
-            if not isinstance(expr.value, list):
-                raise ValueError("IN comparison requires a list of values")
-            param = self._next_filter_param()
-            return f"{field_ref} IN ${param}", {param: expr.value}
-
-        if op in (">", "<", ">=", "<=", "="):
-            if isinstance(expr.value, list):
-                raise ValueError(f"'{op}' comparison cannot accept list values")
-            param = self._next_filter_param()
-            return f"{field_ref} {op} ${param}", {param: expr.value}
-
-        if op == "is_null":
-            return f"{field_ref} IS NULL", params
-
-        if op == "is_not_null":
-            return f"{field_ref} IS NOT NULL", params
-
-        raise ValueError(f"Unsupported operator: {op}")
-
-    def _resolve_field_reference(self, alias: str, field: str) -> str:
+    def _resolve_field_reference(
+        self,
+        alias: str,
+        field: str,
+    ) -> tuple[str, Callable[[FilterValue], Any] | None]:
+        if field in {"created_at", "created_at_ts"}:
+            return f"{alias}.created_at_ts", coerce_datetime_to_timestamp
+        if field in {"updated_at", "updated_at_ts"}:
+            return f"{alias}.updated_at_ts", coerce_datetime_to_timestamp
         if field.startswith(("m.", "metadata.")):
             key = field.split(".", 1)[1]
             prop_name = self._metadata_property_name(key)
-            return f"{alias}.{prop_name}"
-        return f"{alias}.{field}"
+            return f"{alias}.{prop_name}", None
+        return f"{alias}.{field}", None
 
     def _next_filter_param(self) -> str:
         self._filter_param_counter += 1
         return f"filter_param_{self._filter_param_counter}"
 
+    @staticmethod
+    def _adapt_filter_value(
+        value: FilterValue,
+        adapter: Callable[[FilterValue], Any] | None,
+    ) -> FilterValue:
+        if adapter is None:
+            return value
+        adapted = adapter(value)
+        return cast(FilterValue, adapted)
+
     async def _hydrate_vector_index_state(self) -> None:
         self._vector_index_by_set.clear()
         records, _, _ = await self._driver.execute_query(
-            """
-            SHOW VECTOR INDEXES
-            YIELD name, options, labelsOrTypes
-            WHERE name STARTS WITH $prefix
-            RETURN name, options, labelsOrTypes
-            """,
+            _neo4j_query(
+                """
+                SHOW VECTOR INDEXES
+                YIELD name, options, labelsOrTypes
+                WHERE name STARTS WITH $prefix
+                RETURN name, options, labelsOrTypes
+                """
+            ),
             prefix=self._VECTOR_INDEX_PREFIX,
         )
         for record in records:
@@ -1024,7 +1136,7 @@ class Neo4jSemanticStorage(SemanticStorage):
     async def _drop_index_if_named(self, name: str | None) -> None:
         if not name:
             return
-        await self._driver.execute_query(f"DROP INDEX {name} IF EXISTS")
+        await self._driver.execute_query(_neo4j_query(f"DROP INDEX {name} IF EXISTS"))
 
     def _set_id_from_record(self, record: Mapping[str, Any]) -> str | None:
         labels = record.get("labelsOrTypes") or []
@@ -1057,30 +1169,34 @@ class Neo4jSemanticStorage(SemanticStorage):
 
             label = self._set_label_for_set(set_id)
             await self._driver.execute_query(
-                f"""
-                CREATE VECTOR INDEX {index_name}
-                IF NOT EXISTS
-                FOR (f:{label})
-                ON (f.embedding)
-                OPTIONS {{
-                    indexConfig: {{
-                        `vector.dimensions`: $dimensions,
-                        `vector.similarity_function`: 'cosine'
+                _neo4j_query(
+                    f"""
+                    CREATE VECTOR INDEX {index_name}
+                    IF NOT EXISTS
+                    FOR (f:{label})
+                    ON (f.embedding)
+                    OPTIONS {{
+                        indexConfig: {{
+                            `vector.dimensions`: $dimensions,
+                            `vector.similarity_function`: 'cosine'
+                        }}
                     }}
-                }}
-                """,
+                    """
+                ),
                 dimensions=dimensions,
             )
-            await self._driver.execute_query("CALL db.awaitIndexes()")
+            await self._driver.execute_query(_neo4j_query("CALL db.awaitIndexes()"))
 
             records, _, _ = await self._driver.execute_query(
-                """
-                SHOW VECTOR INDEXES
-                YIELD name, type, labelsOrTypes, properties, options
-                WHERE name = $index_name
-                  AND properties = ['embedding']
-                RETURN options
-                """,
+                _neo4j_query(
+                    """
+                    SHOW VECTOR INDEXES
+                    YIELD name, type, labelsOrTypes, properties, options
+                    WHERE name = $index_name
+                      AND properties = ['embedding']
+                    RETURN options
+                    """
+                ),
                 index_name=index_name,
             )
 
@@ -1166,11 +1282,13 @@ class Neo4jSemanticStorage(SemanticStorage):
             return
 
         records, _, _ = await self._driver.execute_query(
-            """
-            MERGE (s:SetEmbedding {set_id: $set_id})
-            ON CREATE SET s.dimensions = $dimensions
-            RETURN s.dimensions AS dims
-            """,
+            _neo4j_query(
+                """
+                MERGE (s:SetEmbedding {set_id: $set_id})
+                ON CREATE SET s.dimensions = $dimensions
+                RETURN s.dimensions AS dims
+                """
+            ),
             set_id=set_id,
             dimensions=dimensions,
         )
@@ -1190,11 +1308,13 @@ class Neo4jSemanticStorage(SemanticStorage):
     async def _ensure_set_label_applied(self, set_id: str) -> None:
         label = self._set_label_for_set(set_id)
         await self._driver.execute_query(
-            f"""
-            MATCH (f:Feature {{ set_id: $set_id }})
-            WHERE NOT f:{label}
-            SET f:{label}
-            """,
+            _neo4j_query(
+                f"""
+                MATCH (f:Feature {{ set_id: $set_id }})
+                WHERE NOT f:{label}
+                SET f:{label}
+                """
+            ),
             set_id=set_id,
         )
 
@@ -1204,7 +1324,7 @@ class Neo4jSemanticStorage(SemanticStorage):
     def _set_id_from_label(self, label: str) -> str | None:
         if not label or not label.startswith(self._SET_LABEL_PREFIX):
             return None
-        suffix = label[len(self._SET_LABEL_PREFIX) :]
+        suffix = label.removeprefix(self._SET_LABEL_PREFIX)
         return _desanitize_identifier(suffix)
 
     @staticmethod
@@ -1226,14 +1346,16 @@ class Neo4jSemanticStorage(SemanticStorage):
         feature_id: FeatureIdT,
     ) -> dict[str, Any] | None:
         records, _, _ = await self._driver.execute_query(
-            f"""
-            MATCH (f:Feature)
-            WHERE {self._feature_id_condition()}
-            RETURN f.set_id AS set_id, f.embedding_dimensions AS embedding_dimensions,
-                   CASE WHEN f.embedding_dimensions IS NULL AND f.embedding IS NOT NULL
-                        THEN size(f.embedding)
-                        ELSE f.embedding_dimensions END AS resolved_dimensions
-            """,
+            _neo4j_query(
+                f"""
+                MATCH (f:Feature)
+                WHERE {self._feature_id_condition()}
+                RETURN f.set_id AS set_id, f.embedding_dimensions AS embedding_dimensions,
+                       CASE WHEN f.embedding_dimensions IS NULL AND f.embedding IS NOT NULL
+                            THEN size(f.embedding)
+                            ELSE f.embedding_dimensions END AS resolved_dimensions
+                """
+            ),
             feature_id=str(feature_id),
         )
         if not records:

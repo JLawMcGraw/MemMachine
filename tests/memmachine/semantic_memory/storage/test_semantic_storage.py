@@ -44,6 +44,121 @@ async def _add_episode(
 
 
 @pytest.mark.asyncio
+async def test_get_set_ids_starts_with(
+    semantic_storage: SemanticStorage,
+):
+    await semantic_storage.add_feature(
+        set_id="user1",
+        category_name="default",
+        feature="likes",
+        value="pizza",
+        tag="food",
+        embedding=np.array([1.0] * 1536, dtype=float),
+    )
+    await semantic_storage.add_feature(
+        set_id="user2",
+        category_name="default",
+        feature="likes",
+        value="sushi",
+        tag="food",
+        embedding=np.array([0.0] * 1536, dtype=float),
+    )
+    await semantic_storage.add_feature(
+        set_id="another",
+        category_name="default",
+        feature="likes",
+        value="burger",
+        tag="food",
+        embedding=np.array([0.0] * 1536, dtype=float),
+    )
+
+    set_ids = await semantic_storage.get_set_ids_starts_with("user")
+
+    set_ids = sorted(set_ids)
+    assert set_ids == ["user1", "user2"]
+
+
+@pytest.mark.asyncio
+async def test_get_set_ids_starts_with_with_no_results(
+    semantic_storage: SemanticStorage,
+):
+    set_ids = await semantic_storage.get_set_ids_starts_with("no_results")
+    assert set_ids == []
+
+
+@pytest.mark.asyncio
+async def test_get_set_ids_starts_with_with_cross_table(
+    semantic_storage: SemanticStorage,
+):
+    await semantic_storage.add_feature(
+        set_id="user1",
+        category_name="default",
+        feature="likes",
+        value="pizza",
+        tag="food",
+        embedding=np.array([0.0] * 1536, dtype=float),
+    )
+
+    await semantic_storage.add_history_to_set(
+        set_id="user1",
+        history_id="episode_id_a",
+    )
+    await semantic_storage.add_history_to_set(
+        set_id="user1",
+        history_id="episode_id_b",
+    )
+    await semantic_storage.add_history_to_set(
+        set_id="user2",
+        history_id="episode_id_c",
+    )
+
+    set_ids = await semantic_storage.get_set_ids_starts_with("user")
+
+    set_ids = sorted(set_ids)
+    assert set_ids == ["user1", "user2"]
+
+
+@pytest.mark.asyncio
+async def test_add_features_with_different_embedding_lengths(
+    semantic_storage: SemanticStorage,
+):
+    # Given two embeddings of different lengths
+    embed_a = np.array([0.1], dtype=float)
+    embed_b = np.array([1.0, 0.1], dtype=float)
+
+    # When we add them to the storage
+    id_a = await semantic_storage.add_feature(
+        set_id="user_a",
+        category_name="default",
+        feature="likes",
+        value="pizza",
+        tag="food",
+        embedding=embed_a,
+    )
+    id_b = await semantic_storage.add_feature(
+        set_id="user_b",
+        category_name="default",
+        feature="likes",
+        value="sushi",
+        tag="food",
+        embedding=embed_b,
+    )
+
+    # Expect no error to have occurred
+    assert id_a is not None
+    assert id_b is not None
+
+    # Expect to be able to search the memory without errors
+    res = await semantic_storage.get_feature_set(
+        filter_expr=_expr("set_id IN (user_a)"),
+        vector_search_opts=SemanticStorage.VectorSearchOpts(query_embedding=embed_a),
+    )
+
+    ids = {r.metadata.id for r in res}
+    assert ids == {id_a}
+
+
+@pytest.mark.asyncio
 async def test_empty_storage(semantic_storage: SemanticStorage):
     assert (
         await semantic_storage.get_feature_set(filter_expr=_expr("set_id IN (user)"))
@@ -435,6 +550,7 @@ async def test_add_feature_with_citations(
         feature_id=feature_id,
         load_citations=True,
     )
+    assert after_citations_features is not None
     assert after_citations_features.metadata.citations is not None
     assert all(
         c_id in citations for c_id in after_citations_features.metadata.citations
@@ -453,12 +569,15 @@ async def test_get_feature_without_citations(
         feature_id=feature_id,
         load_citations=False,
     )
+    assert without_citations is not None
     assert without_citations.metadata.citations is None
 
     with_citations = await semantic_storage.get_feature(
         feature_id=feature_id,
         load_citations=True,
     )
+    assert with_citations is not None
+    assert with_citations.metadata.citations is not None
     assert len(with_citations.metadata.citations) == len(citations)
 
 
@@ -799,7 +918,7 @@ async def test_complex_semantic_search_and_citations(
     assert len(filtered) == 1
     assert filtered[0].value == "ai"
 
-    history_id_set: set[int] = set()
+    history_id_set: set[EpisodeIdT] = set()
     for entry in results:
         if entry.metadata.citations is not None:
             for citation in entry.metadata.citations:
@@ -1028,3 +1147,279 @@ async def test_get_set_ids_with_older_than_and_min_uningested(
     )
 
     assert set_ids == ["busy_user"]
+
+
+@pytest.mark.asyncio
+async def test_filter_features_by_created_at_date(
+    semantic_storage: SemanticStorage,
+):
+    embed = np.array([1.0], dtype=float)
+
+    # Add features at different times
+    await semantic_storage.add_feature(
+        set_id="user",
+        category_name="default",
+        feature="note",
+        value="old_note",
+        tag="misc",
+        embedding=embed,
+    )
+
+    await asyncio.sleep(0.01)
+    cutoff = datetime.now(UTC)
+    await asyncio.sleep(0.01)
+
+    await semantic_storage.add_feature(
+        set_id="user",
+        category_name="default",
+        feature="note",
+        value="new_note",
+        tag="misc",
+        embedding=embed,
+    )
+
+    # Filter for features created before cutoff
+    old_features = await semantic_storage.get_feature_set(
+        filter_expr=_expr(f"created_at<date('{cutoff.isoformat()}')"),
+    )
+    assert len(old_features) == 1
+    assert old_features[0].value == "old_note"
+
+    # Filter for features created after cutoff
+    new_features = await semantic_storage.get_feature_set(
+        filter_expr=_expr(f"created_at>=date('{cutoff.isoformat()}')"),
+    )
+    assert len(new_features) == 1
+    assert new_features[0].value == "new_note"
+
+
+@pytest.mark.asyncio
+async def test_filter_features_by_created_at_with_other_filters(
+    semantic_storage: SemanticStorage,
+):
+    embed = np.array([1.0], dtype=float)
+
+    # Add features with different tags at different times
+    await semantic_storage.add_feature(
+        set_id="user1",
+        category_name="default",
+        feature="note",
+        value="user1_old",
+        tag="important",
+        embedding=embed,
+    )
+
+    await semantic_storage.add_feature(
+        set_id="user2",
+        category_name="default",
+        feature="note",
+        value="user2_old",
+        tag="misc",
+        embedding=embed,
+    )
+
+    await asyncio.sleep(0.01)
+    cutoff = datetime.now(UTC)
+    await asyncio.sleep(0.01)
+
+    await semantic_storage.add_feature(
+        set_id="user1",
+        category_name="default",
+        feature="note",
+        value="user1_new",
+        tag="important",
+        embedding=embed,
+    )
+
+    await semantic_storage.add_feature(
+        set_id="user2",
+        category_name="default",
+        feature="note",
+        value="user2_new",
+        tag="misc",
+        embedding=embed,
+    )
+
+    # Filter for user1's important features created before cutoff
+    results = await semantic_storage.get_feature_set(
+        filter_expr=_expr(
+            f"set_id='user1' AND tag='important' AND created_at<date('{cutoff.isoformat()}')"
+        ),
+    )
+    assert len(results) == 1
+    assert results[0].value == "user1_old"
+
+    # Filter for features created after cutoff
+    new_results = await semantic_storage.get_feature_set(
+        filter_expr=_expr(f"created_at>=date('{cutoff.isoformat()}')"),
+    )
+    assert len(new_results) == 2
+    assert {f.value for f in new_results} == {"user1_new", "user2_new"}
+
+
+@pytest.mark.asyncio
+async def test_filter_features_by_created_at_range(
+    semantic_storage: SemanticStorage,
+):
+    embed = np.array([1.0], dtype=float)
+
+    # Add features at three different times
+    await semantic_storage.add_feature(
+        set_id="user",
+        category_name="default",
+        feature="note",
+        value="note1",
+        tag="misc",
+        embedding=embed,
+    )
+
+    await asyncio.sleep(0.01)
+    start_time = datetime.now(UTC)
+    await asyncio.sleep(0.01)
+
+    await semantic_storage.add_feature(
+        set_id="user",
+        category_name="default",
+        feature="note",
+        value="note2",
+        tag="misc",
+        embedding=embed,
+    )
+
+    await asyncio.sleep(0.01)
+    end_time = datetime.now(UTC)
+    await asyncio.sleep(0.01)
+
+    await semantic_storage.add_feature(
+        set_id="user",
+        category_name="default",
+        feature="note",
+        value="note3",
+        tag="misc",
+        embedding=embed,
+    )
+
+    # Filter for features in the middle time range
+    results = await semantic_storage.get_feature_set(
+        filter_expr=_expr(
+            f"created_at>=date('{start_time.isoformat()}') AND created_at<date('{end_time.isoformat()}')"
+        ),
+    )
+    assert len(results) == 1
+    assert results[0].value == "note2"
+
+
+@pytest.mark.asyncio
+async def test_filter_equality(semantic_storage: SemanticStorage):
+    feature_ids: list[FeatureIdT] = [
+        await semantic_storage.add_feature(
+            set_id="eq-user",
+            category_name="default",
+            feature="rank",
+            value=str(idx),
+            tag="numeric",
+            embedding=np.array([float(idx)], dtype=float),
+        )
+        for idx in range(1, 4)
+    ]
+
+    try:
+        results = await semantic_storage.get_feature_set(
+            filter_expr=_expr("value = '1'"),
+        )
+        assert len(results) == 1
+        assert results[0].value == "1"
+    finally:
+        await semantic_storage.delete_features(feature_ids)
+
+
+@pytest.mark.asyncio
+async def test_filter_not_equal(semantic_storage: SemanticStorage):
+    feature_ids: list[FeatureIdT] = [
+        await semantic_storage.add_feature(
+            set_id="ne-user",
+            category_name="default",
+            feature="rank",
+            value=str(idx),
+            tag="numeric",
+            embedding=np.array([float(idx)], dtype=float),
+        )
+        for idx in range(1, 4)
+    ]
+
+    try:
+        results = await semantic_storage.get_feature_set(
+            filter_expr=_expr("value != '1'"),
+        )
+        assert {f.value for f in results} == {"2", "3"}
+    finally:
+        await semantic_storage.delete_features(feature_ids)
+
+
+@pytest.mark.asyncio
+async def test_filter_greater_equal(semantic_storage: SemanticStorage):
+    feature_ids: list[FeatureIdT] = [
+        await semantic_storage.add_feature(
+            set_id="ge-user",
+            category_name="default",
+            feature="rank",
+            value=str(idx),
+            tag="numeric",
+            embedding=np.array([float(idx)], dtype=float),
+        )
+        for idx in range(1, 4)
+    ]
+
+    try:
+        results = await semantic_storage.get_feature_set(
+            filter_expr=_expr("value >= '2'"),
+        )
+        assert {f.value for f in results} == {"2", "3"}
+    finally:
+        await semantic_storage.delete_features(feature_ids)
+
+
+@pytest.mark.asyncio
+async def test_filter_or(semantic_storage: SemanticStorage):
+    feature_ids: list[FeatureIdT] = []
+    for set_id in ("or-u1", "or-u2", "or-u3"):
+        fid = await semantic_storage.add_feature(
+            set_id=set_id,
+            category_name="default",
+            feature="note",
+            value=f"val-{set_id}",
+            tag="misc",
+            embedding=np.array([1.0], dtype=float),
+        )
+        feature_ids.append(fid)
+
+    try:
+        results = await semantic_storage.get_feature_set(
+            filter_expr=_expr("set_id = 'or-u1' OR set_id = 'or-u2'"),
+        )
+        assert {f.value for f in results} == {"val-or-u1", "val-or-u2"}
+    finally:
+        await semantic_storage.delete_features(feature_ids)
+
+
+@pytest.mark.asyncio
+async def test_filter_not(semantic_storage: SemanticStorage):
+    feature_ids: list[FeatureIdT] = [
+        await semantic_storage.add_feature(
+            set_id="not-user",
+            category_name="default",
+            feature="rank",
+            value=str(idx),
+            tag="numeric",
+            embedding=np.array([float(idx)], dtype=float),
+        )
+        for idx in range(1, 4)
+    ]
+
+    try:
+        results = await semantic_storage.get_feature_set(
+            filter_expr=_expr("NOT value = '1'"),
+        )
+        assert {f.value for f in results} == {"2", "3"}
+    finally:
+        await semantic_storage.delete_features(feature_ids)

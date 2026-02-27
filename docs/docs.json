@@ -54,11 +54,22 @@
             "group": "Integrations",
             "icon": "puzzle-piece",
             "pages": [
-              "install_guide/integrate/claude_code_mcp",
               "install_guide/integrate/GPTStore",
-              "install_guide/integrate/LangGraph"
+              "install_guide/integrate/claude_code_mcp",
+              "install_guide/integrate/LangGraph",
+              "install_guide/integrate/crewai",
+              "install_guide/integrate/n8n",
+              "install_guide/integrate/dify",
+              "install_guide/integrate/Google_ADK"
             ]
-           },
+          },
+          {
+            "group": "Tools",
+            "icon": "screwdriver-wrench",
+            "pages": [
+              "tools/ChatGPT2MemMachine"
+            ]
+          },
           {
             "group": "Core Concepts",
             "icon": "brain",
@@ -99,6 +110,46 @@
             "group": "REST API",
             "openapi": "openapi.json"
             },
+          {
+          "group": "Typescript REST SDK",
+          "pages": [
+            "api_reference/ts-rest/typescript", 
+            {
+              "group": "Classes",
+              "pages": [
+                "api_reference/ts-rest/classes/MemMachineClient",
+                "api_reference/ts-rest/classes/MemMachineAPIError",
+                "api_reference/ts-rest/classes/MemMachineMemory",
+                "api_reference/ts-rest/classes/MemMachineProject"
+              ]
+            },
+            {
+              "group": "Interfaces",
+              "pages": [
+                "api_reference/ts-rest/interfaces/ClientOptions",
+                "api_reference/ts-rest/interfaces/ProjectContext",
+                "api_reference/ts-rest/interfaces/MemoryContext",
+                "api_reference/ts-rest/interfaces/CreateProjectOptions",
+                "api_reference/ts-rest/interfaces/AddMemoryOptions",
+                "api_reference/ts-rest/interfaces/SearchMemoriesOptions",
+                "api_reference/ts-rest/interfaces/ListMemoriesOptions",
+                "api_reference/ts-rest/interfaces/Project",
+                "api_reference/ts-rest/interfaces/AddMemoryResult",
+                "api_reference/ts-rest/interfaces/SearchMemoriesResult",
+                "api_reference/ts-rest/interfaces/EpisodicMemory",
+                "api_reference/ts-rest/interfaces/SemanticMemory",
+                "api_reference/ts-rest/interfaces/HealthStatus"
+              ]
+            },
+            {
+              "group": "Types",
+              "pages": [
+                "api_reference/ts-rest/types/MemoryProducerRole",
+                "api_reference/ts-rest/types/MemoryType"
+              ]
+            }
+          ]
+        },
           {
             "group": "PythonSDK Client",
             "pages": [

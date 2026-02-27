@@ -11,7 +11,7 @@ memmachine-client = { workspace = true }
 
 [project]
 name = "memmachine"
-version = "0.1.0"
+version = "0.0.0"  # Placeholder version for workspace root
 dependencies = [
     "alembic>=1.17.1",
     "asyncpg>=0.31.0",
@@ -22,12 +22,13 @@ dependencies = [
     "coverage>=7.11.0",
     "dotenv>=0.9.9",
     "fastapi>=0.116.1",
-    "fastmcp>=2.12.0",
+    "fastmcp>=2.14.0",
     "instructor[bedrock]>=1.12.0",
+    "json-repair>=0.54",
     "langchain-aws>=0.2.33",
     "neo4j>=5.28.2",
     "nltk>=3.9.1",
-    "openai>=1.104.2",
+    "openai>=2.21.0",
     "pgvector>=0.4.1",
     "prometheus-client>=0.22.1",
     "pydantic>=2.11.7",
@@ -43,11 +44,24 @@ dependencies = [
 ]
 requires-python = ">= 3.12"
 authors = [
-  {name="MemMachine", email="noreply@memmachine.ai"},
+    { name = "MemMachine", email = "noreply@memmachine.ai" },
 ]
-description = "MemMachine is an open-source memory layer for AI agents, giving your creations short-term, long-term, and personalization memory, enabling them to learn, adapt, and remember."
+description = "MemMachine: Open-source long-term memory layer for AI agents and LLMs. Provides episodic memory, profile memory, and working memory to enable persistent, context-aware AI applications that learn and remember across sessions."
 readme = "README.md"
-keywords = ["memmachine"]
+keywords = [
+    "memmachine",
+    "ai-agents",
+    "llm-memory",
+    "long-term-memory",
+    "episodic-memory",
+    "agent-memory",
+    "ai-infrastructure",
+    "langchain",
+    "openai",
+    "anthropic",
+    "mcp",
+    "model-context-protocol",
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -74,21 +88,14 @@ Issues = "https://github.com/MemMachine/MemMachine/issues"
 [dependency-groups]
 dev = [
     "complexipy>=4.2.0",
-    "mypy>=1.18.2",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
-    "ruff>=0.13.2",
+    "ruff~=0.14.0",
     "testcontainers[neo4j,postgres]>=4.13.1",
-    "ty>=0.0.1a26",
+    "ty~=0.0.14",
     "pytest-cov>=7.0.0",
     "pytest-xdist>=3.8.0",
 ]
-
-[tool.mypy]
-follow_untyped_imports = true
-enable_error_code = ["deprecated"]
-exclude = ["venv/", ".venv/"]
-plugins = ['pydantic.mypy']
 
 [tool.ruff]
 exclude = ["tools"]
@@ -143,9 +150,14 @@ ignore = [
     "TRY003",
 ]
 
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["ANN", "D", "SLF", "ARG"]
 "tools/**/*.py" = ["SIM", "DTZ", "C9", "ANN", "T201", "PT", "INP", "PTH", "D"]
+"src/memmachine/common/api/spec.py" = ["UP017", "UP035"]
+"src/memmachine/rest_client/client.py" = ["UP035"]
 "examples/**" = [
     "ANN",
     "ASYNC210",
@@ -179,6 +191,7 @@ ignore = [
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
+addopts = ["-m", "not integration"]
 
 markers = [
     "integration: mark the test as an integration test",
@@ -197,7 +210,7 @@ exclude = []
 
 [tool.coverage.run]
 source = [
-  "src/memmachine",
+    "src/memmachine",
 ]
 
 [tool.coverage.report]

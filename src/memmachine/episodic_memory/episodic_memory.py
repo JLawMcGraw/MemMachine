@@ -17,7 +17,6 @@ Key responsibilities include:
 
 import asyncio
 import datetime
-import json
 import logging
 import time
 from collections.abc import Coroutine, Iterable
@@ -25,12 +24,12 @@ from typing import cast, get_args
 
 from pydantic import BaseModel, Field, InstanceOf, model_validator
 
-from memmachine.common.data_types import FilterablePropertyValue
+from memmachine.common.data_types import PropertyValue
 from memmachine.common.episode_store import (
     Episode,
     EpisodeResponse,
-    EpisodeType,
 )
+from memmachine.common.episode_store.episode_model import episodes_to_string
 from memmachine.common.filter.filter_parser import (
     FilterExpr,
 )
@@ -222,7 +221,7 @@ class EpisodicMemory:
             if episode.metadata is not None and episode.filterable_metadata is None:
                 episode.filterable_metadata = {}
                 for key, value in episode.metadata.items():
-                    if isinstance(value, get_args(FilterablePropertyValue)):
+                    if isinstance(value, get_args(PropertyValue)):
                         episode.filterable_metadata[key] = value
 
         # Add the episode to both memory stores concurrently
@@ -305,7 +304,10 @@ class EpisodicMemory:
     async def query_memory(
         self,
         query: str,
+        *,
         limit: int | None = None,
+        expand_context: int = 0,
+        score_threshold: float = -float("inf"),
         property_filter: FilterExpr | None = None,
     ) -> QueryResponse | None:
         """
@@ -320,6 +322,9 @@ class EpisodicMemory:
             limit: The maximum number of episodes to return. The limit is
                    applied to both short and long term memories. The default
                    value is 20.
+            expand_context: The number of additional episodes to include
+                            around each matched episode from long term memory.
+            score_threshold: Minimum score to consider a match.
             property_filter: Properties to filter declarative memory searches.
 
         Returns:
@@ -336,9 +341,13 @@ class EpisodicMemory:
         if self._short_term_memory is None:
             short_episode: list[Episode] = []
             short_summary = ""
-            long_episode = await cast("LongTermMemory", self._long_term_memory).search(
+            scored_long_episodes = await cast(
+                "LongTermMemory", self._long_term_memory
+            ).search_scored(
                 query,
                 num_episodes_limit=search_limit,
+                expand_context=expand_context,
+                score_threshold=score_threshold,
                 property_filter=property_filter,
             )
         elif self._long_term_memory is None:
@@ -349,19 +358,21 @@ class EpisodicMemory:
                     filters=property_filter,
                 )
             )
-            long_episode = []
+            scored_long_episodes = []
             short_episode, short_summary = session_result
         else:
             # Concurrently search both memory stores
-            session_result, long_episode = await asyncio.gather(
+            session_result, scored_long_episodes = await asyncio.gather(
                 self._short_term_memory.get_short_term_memory_context(
                     query,
                     limit=search_limit,
                     filters=property_filter,
                 ),
-                self._long_term_memory.search(
+                self._long_term_memory.search_scored(
                     query,
                     num_episodes_limit=search_limit,
+                    expand_context=expand_context,
+                    score_threshold=score_threshold,
                     property_filter=property_filter,
                 ),
             )
@@ -371,11 +382,11 @@ class EpisodicMemory:
         # short-term memory
         episode_uid_set = {episode.uid for episode in short_episode}
 
-        unique_long_episodes = []
-        for episode in long_episode:
+        unique_scored_long_episodes = []
+        for score, episode in scored_long_episodes:
             if episode.uid not in episode_uid_set:
                 episode_uid_set.add(episode.uid)
-                unique_long_episodes.append(episode)
+                unique_scored_long_episodes.append((score, episode))
 
         end_time = time.monotonic_ns()
         delta = (end_time - start_time) / 1000000
@@ -391,8 +402,8 @@ class EpisodicMemory:
             ),
             long_term_memory=EpisodicMemory.QueryResponse.LongTermMemoryResponse(
                 episodes=[
-                    EpisodeResponse(**episode.model_dump())
-                    for episode in unique_long_episodes
+                    EpisodeResponse(score=score, **episode.model_dump())
+                    for score, episode in unique_scored_long_episodes
                 ],
             ),
         )
@@ -401,6 +412,8 @@ class EpisodicMemory:
         self,
         query: str,
         limit: int | None = None,
+        expand_context: int = 0,
+        score_threshold: float = -float("inf"),
         property_filter: FilterExpr | None = None,
     ) -> str:
         """
@@ -412,6 +425,9 @@ class EpisodicMemory:
         Args:
             query: The original query string.
             limit: The maximum number of episodes to include in the context.
+            expand_context: The number of additional episodes to include
+                            around each matched episode from long term memory.
+            score_threshold: Minimum score to include in the context.
             property_filter: Properties to filter the search.
 
         Returns:
@@ -420,8 +436,10 @@ class EpisodicMemory:
         """
         query_result = await self.query_memory(
             query,
-            limit,
-            property_filter,
+            limit=limit,
+            expand_context=expand_context,
+            score_threshold=score_threshold,
+            property_filter=property_filter,
         )
         if query_result is None:
             logger.warning("Query result is None in formalize_query_with_context")
@@ -454,7 +472,7 @@ class EpisodicMemory:
         # Add episodes if they exist
         if episodes and len(episodes) > 0:
             finalized_query += "<Episodes>\n"
-            finalized_query += EpisodicMemory.string_from_episode_response_context(
+            finalized_query += episodes_to_string(
                 episodes,
             )
             finalized_query += "</Episodes>\n"
@@ -463,43 +481,3 @@ class EpisodicMemory:
         finalized_query += f"<Query>\n{query}\n</Query>"
 
         return finalized_query
-
-    @staticmethod
-    def string_from_episode_response_context(
-        episode_response_context: Iterable[EpisodeResponse],
-    ) -> str:
-        """Format episode response context as a string."""
-        context_string = ""
-
-        for episode_response in episode_response_context:
-            match episode_response.episode_type:
-                case EpisodeType.MESSAGE:
-                    context_date = (
-                        EpisodicMemory._format_date(
-                            episode_response.created_at.date(),
-                        )
-                        if episode_response.created_at
-                        else "Unknown Date"
-                    )
-                    context_time = (
-                        EpisodicMemory._format_time(
-                            episode_response.created_at.time(),
-                        )
-                        if episode_response.created_at
-                        else "Unknown Time"
-                    )
-                    context_string += f"[{context_date} at {context_time}] {episode_response.producer_id}: {json.dumps(episode_response.content)}\n"
-                case _:
-                    context_string += json.dumps(episode_response.content) + "\n"
-
-        return context_string
-
-    @staticmethod
-    def _format_date(date: datetime.date) -> str:
-        """Format the date as a string."""
-        return date.strftime("%A, %B %d, %Y")
-
-    @staticmethod
-    def _format_time(time: datetime.time) -> str:
-        """Format the time as a string."""
-        return time.strftime("%I:%M %p")

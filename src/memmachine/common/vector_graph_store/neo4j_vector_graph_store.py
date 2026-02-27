@@ -11,15 +11,14 @@ import re
 import time
 from collections.abc import Awaitable, Iterable, Mapping
 from enum import Enum
-from typing import cast
+from typing import Any, LiteralString, cast
 from uuid import uuid4
 
-from neo4j import AsyncDriver
+from neo4j import AsyncDriver, Query
 from neo4j.graph import Node as Neo4jNode
-from neo4j.time import DateTime as Neo4jDateTime
 from pydantic import BaseModel, Field, InstanceOf
 
-from memmachine.common.data_types import FilterablePropertyValue, SimilarityMetric
+from memmachine.common.data_types import FilterValue, OrderedValue, SimilarityMetric
 from memmachine.common.filter.filter_parser import (
     And as FilterAnd,
 )
@@ -30,16 +29,29 @@ from memmachine.common.filter.filter_parser import (
     FilterExpr,
 )
 from memmachine.common.filter.filter_parser import (
+    In as FilterIn,
+)
+from memmachine.common.filter.filter_parser import (
+    IsNull as FilterIsNull,
+)
+from memmachine.common.filter.filter_parser import (
+    Not as FilterNot,
+)
+from memmachine.common.filter.filter_parser import (
     Or as FilterOr,
 )
 from memmachine.common.metrics_factory import MetricsFactory
+from memmachine.common.neo4j_utils import (
+    render_comparison,
+    sanitize_value_for_neo4j,
+    value_from_neo4j,
+)
 from memmachine.common.utils import async_locked
 
 from .data_types import (
     Edge,
     EntityType,
     Node,
-    OrderedPropertyValue,
     PropertyValue,
     demangle_embedding_name,
     demangle_property_name,
@@ -51,6 +63,10 @@ from .data_types import (
 from .vector_graph_store import VectorGraphStore
 
 logger = logging.getLogger(__name__)
+
+
+def _neo4j_query(text: str) -> Query:
+    return Query(cast(LiteralString, text))
 
 
 class Neo4jVectorGraphStoreParams(BaseModel):
@@ -174,7 +190,7 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         """Initialize the graph store with the provided parameters."""
         super().__init__()
 
-        self._driver = params.driver
+        self._driver: AsyncDriver = params.driver
 
         self._force_exact_similarity_search = params.force_exact_similarity_search
         self._filtered_similarity_search_fudge_factor = (
@@ -403,6 +419,8 @@ class Neo4jVectorGraphStore(VectorGraphStore):
 
         sanitized_collection = Neo4jVectorGraphStore._sanitize_name(collection)
         sanitized_embedding_names = set()
+        embedding_dimensions_by_name: dict[str, int] = {}
+        embedding_similarity_by_name: dict[str, SimilarityMetric] = {}
 
         query_nodes = []
         for node in nodes:
@@ -427,6 +445,12 @@ class Neo4jVectorGraphStore(VectorGraphStore):
                 )
 
                 sanitized_embedding_names.add(sanitized_embedding_name)
+                embedding_dimensions_by_name[sanitized_embedding_name] = len(
+                    embedding,
+                )
+                embedding_similarity_by_name[sanitized_embedding_name] = (
+                    similarity_metric
+                )
 
                 query_node_properties[sanitized_embedding_name] = embedding
                 query_node_properties[sanitized_similarity_metric_name] = (
@@ -440,9 +464,11 @@ class Neo4jVectorGraphStore(VectorGraphStore):
             query_nodes.append(query_node)
 
         await self._driver.execute_query(
-            "UNWIND $nodes AS node\n"
-            f"CREATE (n:{sanitized_collection} {{uid: node.uid}})\n"
-            "SET n += node.properties",
+            _neo4j_query(
+                "UNWIND $nodes AS node\n"
+                f"CREATE (n:{sanitized_collection} {{uid: node.uid}})\n"
+                "SET n += node.properties"
+            ),
             nodes=query_nodes,
         )
 
@@ -480,8 +506,12 @@ class Neo4jVectorGraphStore(VectorGraphStore):
                                 entity_type=EntityType.NODE,
                                 sanitized_collection_or_relation=sanitized_collection,
                                 sanitized_embedding_name=sanitized_embedding_name,
-                                dimensions=len(embedding),
-                                similarity_metric=similarity_metric,
+                                dimensions=embedding_dimensions_by_name[
+                                    sanitized_embedding_name
+                                ],
+                                similarity_metric=embedding_similarity_by_name[
+                                    sanitized_embedding_name
+                                ],
                             ),
                         )
                     )
@@ -511,6 +541,8 @@ class Neo4jVectorGraphStore(VectorGraphStore):
 
         sanitized_relation = Neo4jVectorGraphStore._sanitize_name(relation)
         sanitized_embedding_names = set()
+        embedding_dimensions_by_name: dict[str, int] = {}
+        embedding_similarity_by_name: dict[str, SimilarityMetric] = {}
 
         query_edges = []
         for edge in edges:
@@ -535,6 +567,12 @@ class Neo4jVectorGraphStore(VectorGraphStore):
                 )
 
                 sanitized_embedding_names.add(sanitized_embedding_name)
+                embedding_dimensions_by_name[sanitized_embedding_name] = len(
+                    embedding,
+                )
+                embedding_similarity_by_name[sanitized_embedding_name] = (
+                    similarity_metric
+                )
 
                 query_edge_properties[sanitized_embedding_name] = embedding
                 query_edge_properties[sanitized_similarity_metric_name] = (
@@ -556,14 +594,16 @@ class Neo4jVectorGraphStore(VectorGraphStore):
             target_collection,
         )
         await self._driver.execute_query(
-            "UNWIND $edges AS edge\n"
-            "MATCH"
-            f"    (source:{sanitized_source_collection} {{uid: edge.source_uid}}),"
-            f"    (target:{sanitized_target_collection} {{uid: edge.target_uid}})\n"
-            "CREATE (source)"
-            f"    -[r:{sanitized_relation} {{uid: edge.uid}}]->"
-            "    (target)\n"
-            "SET r += edge.properties",
+            _neo4j_query(
+                "UNWIND $edges AS edge\n"
+                "MATCH"
+                f"    (source:{sanitized_source_collection} {{uid: edge.source_uid}}),"
+                f" (target:{sanitized_target_collection} {{uid: edge.target_uid}})\n"
+                "CREATE (source)"
+                f"    -[r:{sanitized_relation} {{uid: edge.uid}}]->"
+                "    (target)\n"
+                "SET r += edge.properties"
+            ),
             edges=query_edges,
         )
 
@@ -598,8 +638,12 @@ class Neo4jVectorGraphStore(VectorGraphStore):
                                 entity_type=EntityType.EDGE,
                                 sanitized_collection_or_relation=sanitized_relation,
                                 sanitized_embedding_name=sanitized_embedding_name,
-                                dimensions=len(embedding),
-                                similarity_metric=similarity_metric,
+                                dimensions=embedding_dimensions_by_name[
+                                    sanitized_embedding_name
+                                ],
+                                similarity_metric=embedding_similarity_by_name[
+                                    sanitized_embedding_name
+                                ],
                             ),
                         )
                     )
@@ -629,6 +673,11 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         sanitized_embedding_name = Neo4jVectorGraphStore._sanitize_name(
             mangle_embedding_name(embedding_name),
         )
+        vector_index_name = Neo4jVectorGraphStore._index_name(
+            EntityType.NODE,
+            sanitized_collection,
+            sanitized_embedding_name,
+        )
 
         query_filter_string, query_filter_params = (
             Neo4jVectorGraphStore._build_query_filter(
@@ -639,15 +688,10 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         )
 
         do_exact_similarity_search = self._force_exact_similarity_search
+        records: list[Any] = []
 
         if not do_exact_similarity_search:
             await self._populate_index_state_cache()
-
-            vector_index_name = Neo4jVectorGraphStore._index_name(
-                EntityType.NODE,
-                sanitized_collection,
-                sanitized_embedding_name,
-            )
 
             if (
                 self._index_state_cache.get(vector_index_name)
@@ -672,7 +716,7 @@ class Neo4jVectorGraphStore(VectorGraphStore):
             )
 
             records, _, _ = await self._driver.execute_query(
-                query,
+                _neo4j_query(query),
                 query_embedding=query_embedding,
                 query_limit=(
                     limit
@@ -714,7 +758,7 @@ class Neo4jVectorGraphStore(VectorGraphStore):
             )
 
             records, _, _ = await self._driver.execute_query(
-                query,
+                _neo4j_query(query),
                 query_embedding=query_embedding,
                 limit=limit,
                 query_filter_params=query_filter_params,
@@ -785,16 +829,18 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         sanitized_relation = Neo4jVectorGraphStore._sanitize_name(relation)
 
         records, _, _ = await self._driver.execute_query(
-            "MATCH\n"
-            f"    (m:{sanitized_this_collection} {{uid: $node_uid}})"
-            f"    {'-' if find_targets else '<-'}"
-            f"    [r:{sanitized_relation}]"
-            f"    {'-' if find_sources else '->'}"
-            f"    (n:{sanitized_other_collection})"
-            f"WHERE {edge_query_filter_string}\n"
-            f"AND {node_query_filter_string}\n"
-            "RETURN DISTINCT n\n"
-            f"{'LIMIT $limit' if limit is not None else ''}",
+            _neo4j_query(
+                "MATCH\n"
+                f"    (m:{sanitized_this_collection} {{uid: $node_uid}})"
+                f"    {'-' if find_targets else '<-'}"
+                f"    [r:{sanitized_relation}]"
+                f"    {'-' if find_sources else '->'}"
+                f"    (n:{sanitized_other_collection})"
+                f"WHERE {edge_query_filter_string}\n"
+                f"AND {node_query_filter_string}\n"
+                "RETURN DISTINCT n\n"
+                f"{'LIMIT $limit' if limit is not None else ''}"
+            ),
             node_uid=str(this_node_uid),
             limit=limit,
             edge_query_filter_params=edge_query_filter_params,
@@ -821,7 +867,7 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         *,
         collection: str,
         by_properties: Iterable[str],
-        starting_at: Iterable[OrderedPropertyValue | None],
+        starting_at: Iterable[OrderedValue | None],
         order_ascending: Iterable[bool],
         include_equal_start: bool = False,
         limit: int | None = 1,
@@ -858,11 +904,20 @@ class Neo4jVectorGraphStore(VectorGraphStore):
             + (
                 (
                     " OR ("
-                    + " AND ".join(
-                        f"(n.{sanitized_by_property} = $starting_at[{index}])"
-                        for index, sanitized_by_property in enumerate(
-                            sanitized_by_properties,
+                    + (
+                        " AND ".join(
+                            render_comparison(
+                                f"n.{sanitized_by_property}",
+                                "=",
+                                f"$starting_at[{index}]",
+                                starting_value,
+                            )
+                            for index, sanitized_by_property in enumerate(
+                                sanitized_by_properties,
+                            )
+                            if (starting_value := starting_at[index]) is not None
                         )
+                        or "TRUE"  # All starting_at values are None → no constraints
                     )
                     + ")"
                 )
@@ -891,13 +946,18 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         )
 
         records, _, _ = await self._driver.execute_query(
-            f"MATCH (n:{sanitized_collection})\n"
-            f"WHERE ({query_relational_requirements})\n"
-            f"AND {query_filter_string}\n"
-            "RETURN n\n"
-            f"{query_order_by}"
-            f"{'LIMIT $limit' if limit is not None else ''}",
-            starting_at=starting_at,
+            _neo4j_query(
+                f"MATCH (n:{sanitized_collection})\n"
+                f"WHERE ({query_relational_requirements})\n"
+                f"AND {query_filter_string}\n"
+                "RETURN n\n"
+                f"{query_order_by}"
+                f"{'LIMIT $limit' if limit is not None else ''}"
+            ),
+            starting_at=[
+                sanitize_value_for_neo4j(starting_at_value)
+                for starting_at_value in starting_at
+            ],
             limit=limit,
             query_filter_params=query_filter_params,
         )
@@ -922,7 +982,7 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         entity_query_alias: str,
         starting_at_query_parameter: str,
         sanitized_by_properties: Iterable[str],
-        starting_at: Iterable[OrderedPropertyValue | None],
+        starting_at: Iterable[OrderedValue | None],
         order_ascending: Iterable[bool],
     ) -> str:
         sanitized_by_properties = list(sanitized_by_properties)
@@ -933,24 +993,42 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         for index, sanitized_by_property in enumerate(sanitized_by_properties):
             sanitized_equal_properties = sanitized_by_properties[:index]
 
-            relational_requirements = [
-                (
-                    f"({entity_query_alias}.{sanitized_by_property}"
-                    + (" > " if order_ascending[index] else " < ")
-                    + f"${starting_at_query_parameter}[{index}])"
-                )
-                if starting_at[index] is not None
-                else f"({entity_query_alias}.{sanitized_by_property} IS NOT NULL)",
-            ]
+            # The same points in time with different timezones are not equal in Neo4j,
+            # so we use epochSeconds and nanosecond for datetime comparisons.
+            # https://neo4j.com/docs/cypher-manual/current/values-and-types/ordering-equality-comparison/#ordering-spatial-temporal
 
-            relational_requirements += [
-                f"({entity_query_alias}.{sanitized_equal_property} = ${starting_at_query_parameter}[{equal_index}])"
-                if starting_at[equal_index] is not None
-                else f"({entity_query_alias}.{sanitized_equal_property} IS NOT NULL)"
-                for equal_index, sanitized_equal_property in enumerate(
-                    sanitized_equal_properties,
-                )
-            ]
+            starting_value = starting_at[index]
+            if starting_value is None:
+                relational_requirements = [
+                    f"{entity_query_alias}.{sanitized_by_property} IS NOT NULL",
+                ]
+            else:
+                relational_requirements = [
+                    render_comparison(
+                        f"{entity_query_alias}.{sanitized_by_property}",
+                        ">" if order_ascending[index] else "<",
+                        f"${starting_at_query_parameter}[{index}]",
+                        starting_value,
+                    )
+                ]
+
+            for equal_index, sanitized_equal_property in enumerate(
+                sanitized_equal_properties,
+            ):
+                starting_value = starting_at[equal_index]
+                if starting_value is None:
+                    relational_requirements += [
+                        f"{entity_query_alias}.{sanitized_equal_property} IS NOT NULL"
+                    ]
+                else:
+                    relational_requirements += [
+                        render_comparison(
+                            f"{entity_query_alias}.{sanitized_equal_property}",
+                            "=",
+                            f"${starting_at_query_parameter}[{equal_index}]",
+                            starting_value,
+                        )
+                    ]
 
             lexicographic_relational_requirement = (
                 f"({' AND '.join(relational_requirements)})"
@@ -987,10 +1065,12 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         )
 
         records, _, _ = await self._driver.execute_query(
-            f"MATCH (n:{sanitized_collection})\n"
-            f"WHERE {query_filter_string}\n"
-            "RETURN n\n"
-            f"{'LIMIT $limit' if limit is not None else ''}",
+            _neo4j_query(
+                f"MATCH (n:{sanitized_collection})\n"
+                f"WHERE {query_filter_string}\n"
+                "RETURN n\n"
+                f"{'LIMIT $limit' if limit is not None else ''}"
+            ),
             limit=limit,
             query_filter_params=query_filter_params,
         )
@@ -1022,9 +1102,11 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         sanitized_collection = Neo4jVectorGraphStore._sanitize_name(collection)
 
         records, _, _ = await self._driver.execute_query(
-            "UNWIND $node_uids AS node_uid\n"
-            f"MATCH (n:{sanitized_collection} {{uid: node_uid}})\n"
-            "RETURN n",
+            _neo4j_query(
+                "UNWIND $node_uids AS node_uid\n"
+                f"MATCH (n:{sanitized_collection} {{uid: node_uid}})\n"
+                "RETURN n"
+            ),
             node_uids=[str(node_uid) for node_uid in node_uids],
         )
 
@@ -1053,9 +1135,11 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         sanitized_collection = Neo4jVectorGraphStore._sanitize_name(collection)
 
         await self._driver.execute_query(
-            "UNWIND $node_uids AS node_uid\n"
-            f"MATCH (n:{sanitized_collection} {{uid: node_uid}})\n"
-            "DETACH DELETE n",
+            _neo4j_query(
+                "UNWIND $node_uids AS node_uid\n"
+                f"MATCH (n:{sanitized_collection} {{uid: node_uid}})\n"
+                "DETACH DELETE n"
+            ),
             node_uids=[str(node_uid) for node_uid in node_uids],
         )
 
@@ -1069,7 +1153,7 @@ class Neo4jVectorGraphStore(VectorGraphStore):
 
     async def delete_all_data(self) -> None:
         """Delete all nodes and relationships from the database."""
-        await self._driver.execute_query("MATCH (n) DETACH DELETE n")
+        await self._driver.execute_query(_neo4j_query("MATCH (n) DETACH DELETE n"))
 
     async def close(self) -> None:
         """Close the underlying Neo4j driver."""
@@ -1082,7 +1166,9 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         sanitized_collection = Neo4jVectorGraphStore._sanitize_name(collection)
 
         records, _, _ = await self._driver.execute_query(
-            f"MATCH (n:{sanitized_collection})\nRETURN count(n) AS node_count",
+            _neo4j_query(
+                f"MATCH (n:{sanitized_collection})\nRETURN count(n) AS node_count"
+            ),
         )
 
         end_time = time.monotonic()
@@ -1102,8 +1188,10 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         sanitized_relation = Neo4jVectorGraphStore._sanitize_name(relation)
 
         records, _, _ = await self._driver.execute_query(
-            f"MATCH ()-[r:{sanitized_relation}]->()\n"
-            "RETURN count(r) AS relationship_count",
+            _neo4j_query(
+                f"MATCH ()-[r:{sanitized_relation}]->()\n"
+                "RETURN count(r) AS relationship_count"
+            ),
         )
 
         end_time = time.monotonic()
@@ -1133,11 +1221,11 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         async with self._populate_index_state_cache_lock:
             if not self._index_state_cache:
                 records, _, _ = await self._driver.execute_query(
-                    "SHOW INDEXES YIELD name RETURN name",
+                    _neo4j_query("SHOW INDEXES YIELD name RETURN name"),
                 )
 
                 # This ensures that all the indexes in records are online.
-                await self._driver.execute_query("CALL db.awaitIndexes()")
+                await self._driver.execute_query(_neo4j_query("CALL db.awaitIndexes()"))
 
                 # Synchronous code is atomic in asynchronous framework
                 # so double-checked locking works here.
@@ -1264,15 +1352,17 @@ class Neo4jVectorGraphStore(VectorGraphStore):
                 )
 
         create_index_awaitable = self._driver.execute_query(
-            f"CREATE RANGE INDEX {range_index_name}\n"
-            "IF NOT EXISTS\n"
-            f"FOR {query_index_for_expression}\n"
-            f"ON ({
-                ', '.join(
-                    f'e.{sanitized_property_name}'
-                    for sanitized_property_name in sanitized_property_names
-                )
-            })",
+            _neo4j_query(
+                f"CREATE RANGE INDEX {range_index_name}\n"
+                "IF NOT EXISTS\n"
+                f"FOR {query_index_for_expression}\n"
+                f"ON ({
+                    ', '.join(
+                        f'e.{sanitized_property_name}'
+                        for sanitized_property_name in sanitized_property_names
+                    )
+                })"
+            ),
         )
 
         await self._await_create_index_if_not_exists(
@@ -1359,18 +1449,20 @@ class Neo4jVectorGraphStore(VectorGraphStore):
                 )
 
         create_index_awaitable = self._driver.execute_query(
-            f"CREATE VECTOR INDEX {vector_index_name}\n"
-            "IF NOT EXISTS\n"
-            f"FOR {query_index_for_expression}\n"
-            f"ON e.{sanitized_embedding_name}\n"
-            "OPTIONS {\n"
-            "    indexConfig: {\n"
-            "        `vector.dimensions`:\n"
-            "            $dimensions,\n"
-            "        `vector.similarity_function`:\n"
-            "            $similarity_function\n"
-            "    }\n"
-            "}",
+            _neo4j_query(
+                f"CREATE VECTOR INDEX {vector_index_name}\n"
+                "IF NOT EXISTS\n"
+                f"FOR {query_index_for_expression}\n"
+                f"ON e.{sanitized_embedding_name}\n"
+                "OPTIONS {\n"
+                "    indexConfig: {\n"
+                "        `vector.dimensions`:\n"
+                "            $dimensions,\n"
+                "        `vector.similarity_function`:\n"
+                "            $similarity_function\n"
+                "    }\n"
+                "}"
+            ),
             dimensions=dimensions,
             similarity_function=similarity_function,
         )
@@ -1398,7 +1490,7 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         await create_index_awaitable
 
         await self._driver.execute_query(
-            "CALL db.awaitIndex($index_name)",
+            _neo4j_query("CALL db.awaitIndex($index_name)"),
             index_name=index_name,
         )
 
@@ -1431,7 +1523,9 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         """Sanitize property names in a mapping for Neo4j storage."""
         return (
             {
-                Neo4jVectorGraphStore._sanitize_name(key): value
+                Neo4jVectorGraphStore._sanitize_name(key): sanitize_value_for_neo4j(
+                    value
+                )
                 for key, value in properties.items()
             }
             if properties is not None
@@ -1502,22 +1596,17 @@ class Neo4jVectorGraphStore(VectorGraphStore):
 
                 if is_mangled_property_name(desanitized_property_name):
                     property_name = demangle_property_name(desanitized_property_name)
-                    property_value = (
-                        Neo4jVectorGraphStore._python_value_from_neo4j_value(
-                            neo4j_property_value,
-                        )
+                    node_properties[property_name] = value_from_neo4j(
+                        neo4j_property_value,
                     )
-                    node_properties[property_name] = property_value
                 elif is_mangled_embedding_name(desanitized_property_name):
                     embedding_name = demangle_embedding_name(desanitized_property_name)
                     embedding_value = cast(
                         list[float],
-                        Neo4jVectorGraphStore._python_value_from_neo4j_value(
-                            neo4j_property_value,
-                        ),
+                        value_from_neo4j(neo4j_property_value),
                     )
                     similarity_metric = SimilarityMetric(
-                        Neo4jVectorGraphStore._python_value_from_neo4j_value(
+                        value_from_neo4j(
                             neo4j_node[
                                 Neo4jVectorGraphStore._sanitize_name(
                                     Neo4jVectorGraphStore._similarity_metric_property_name(
@@ -1542,24 +1631,6 @@ class Neo4jVectorGraphStore(VectorGraphStore):
 
         return nodes
 
-    @staticmethod
-    def _python_value_from_neo4j_value(
-        value: PropertyValue | Neo4jDateTime,
-    ) -> PropertyValue:
-        """
-        Convert a Neo4j value to a native Python value.
-
-        Args:
-            value (PropertyValue | Neo4jDateTime): The Neo4j value to convert.
-
-        Returns:
-            PropertyValue: The converted Python value.
-
-        """
-        if isinstance(value, Neo4jDateTime):
-            return value.to_native()
-        return value
-
     def _collect_metrics(
         self,
         calls_counter: MetricsFactory.Counter | None,
@@ -1582,12 +1653,10 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         entity_query_alias: str,
         query_value_parameter: str,
         property_filter: FilterExpr | None,
-    ) -> tuple[str, dict[str, FilterablePropertyValue | list[FilterablePropertyValue]]]:
+    ) -> tuple[str, dict[str, FilterValue]]:
         if property_filter is None:
             query_filter_string = "TRUE"
-            query_filter_params: dict[
-                str, FilterablePropertyValue | list[FilterablePropertyValue]
-            ] = {}
+            query_filter_params: dict[str, FilterValue] = {}
         else:
             query_filter_string, query_filter_params = (
                 Neo4jVectorGraphStore._render_filter_expr(
@@ -1604,55 +1673,60 @@ class Neo4jVectorGraphStore(VectorGraphStore):
         entity_query_alias: str,
         query_value_parameter: str,
         expr: FilterExpr,
-    ) -> tuple[str, dict[str, FilterablePropertyValue | list[FilterablePropertyValue]]]:
-        if isinstance(expr, FilterComparison):
-            field_ref = f"{entity_query_alias}.{
-                Neo4jVectorGraphStore._sanitize_name(mangle_property_name(expr.field))
-            }"
-            param_name = Neo4jVectorGraphStore._sanitize_name(
-                f"filter_expr_param_{uuid4()}"
-            )
+    ) -> tuple[str, dict[str, FilterValue]]:
+        _render = Neo4jVectorGraphStore._render_filter_expr
+        _sanitize = Neo4jVectorGraphStore._sanitize_name
 
-            params: dict[
-                str, FilterablePropertyValue | list[FilterablePropertyValue]
-            ] = {}
-            if expr.op in (">", "<", ">=", "<=", "="):
-                if isinstance(expr.value, list):
-                    raise ValueError(
-                        f"'{expr.op}' comparison cannot accept list values"
-                    )
-                condition = (
-                    f"{field_ref} {expr.op} ${query_value_parameter}.{param_name}"
-                )
-                params[param_name] = expr.value
-            elif expr.op == "in":
-                if not isinstance(expr.value, list):
-                    raise ValueError("IN comparison requires a list of values")
-                condition = f"{field_ref} IN ${query_value_parameter}.{param_name}"
-                params[param_name] = expr.value
-            elif expr.op == "is_null":
-                condition = f"{field_ref} IS NULL"
-            elif expr.op == "is_not_null":
-                condition = f"{field_ref} IS NOT NULL"
-            else:
-                raise ValueError(f"Unsupported operator: {expr.op}")
+        if isinstance(expr, FilterIsNull):
+            field_ref = (
+                f"{entity_query_alias}.{_sanitize(mangle_property_name(expr.field))}"
+            )
+            return f"{field_ref} IS NULL", {}
+
+        if isinstance(expr, FilterIn):
+            field_ref = (
+                f"{entity_query_alias}.{_sanitize(mangle_property_name(expr.field))}"
+            )
+            param_name = _sanitize(f"filter_expr_param_{uuid4()}")
+            condition = f"{field_ref} IN ${query_value_parameter}.{param_name}"
+            params = {param_name: expr.values}
             return condition, params
+
+        if isinstance(expr, FilterComparison):
+            field_ref = (
+                f"{entity_query_alias}.{_sanitize(mangle_property_name(expr.field))}"
+            )
+            param_name = _sanitize(f"filter_expr_param_{uuid4()}")
+            condition = render_comparison(
+                left=field_ref,
+                op=expr.op,
+                right=f"${query_value_parameter}.{param_name}",
+                value=expr.value,
+            )
+            params = {
+                param_name: cast(FilterValue, sanitize_value_for_neo4j(expr.value))
+            }
+            return condition, params
+
         if isinstance(expr, FilterAnd):
-            left_cond, left_params = Neo4jVectorGraphStore._render_filter_expr(
+            left_cond, left_params = _render(
                 entity_query_alias, query_value_parameter, expr.left
             )
-            right_cond, right_params = Neo4jVectorGraphStore._render_filter_expr(
+            right_cond, right_params = _render(
                 entity_query_alias, query_value_parameter, expr.right
             )
-            condition = f"({left_cond}) AND ({right_cond})"
-            return condition, left_params | right_params
+            return f"({left_cond}) AND ({right_cond})", left_params | right_params
         if isinstance(expr, FilterOr):
-            left_cond, left_params = Neo4jVectorGraphStore._render_filter_expr(
+            left_cond, left_params = _render(
                 entity_query_alias, query_value_parameter, expr.left
             )
-            right_cond, right_params = Neo4jVectorGraphStore._render_filter_expr(
+            right_cond, right_params = _render(
                 entity_query_alias, query_value_parameter, expr.right
             )
-            condition = f"({left_cond}) OR ({right_cond})"
-            return condition, left_params | right_params
+            return f"({left_cond}) OR ({right_cond})", left_params | right_params
+        if isinstance(expr, FilterNot):
+            inner_cond, inner_params = _render(
+                entity_query_alias, query_value_parameter, expr.expr
+            )
+            return f"NOT ({inner_cond})", inner_params
         raise TypeError(f"Unsupported filter expression type: {type(expr)!r}")

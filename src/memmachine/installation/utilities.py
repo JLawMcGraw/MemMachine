@@ -1,7 +1,6 @@
 """Utility functions and constants for MemMachine installation scripts."""
 
 from enum import Enum
-from typing import Self
 
 LINUX_JDK_TAR_NAME = "jdk-21_linux-x64_bin.tar.gz"
 LINUX_JDK_URL = f"https://download.oracle.com/java/21/latest/{LINUX_JDK_TAR_NAME}"
@@ -12,7 +11,16 @@ WINDOWS_NEO4J_ZIP_NAME = f"{NEO4J_DIR_NAME}-windows.zip"
 WINDOWS_NEO4J_URL = f"https://dist.neo4j.org/{WINDOWS_NEO4J_ZIP_NAME}"
 LINUX_NEO4J_TAR_NAME = f"{NEO4J_DIR_NAME}-unix.tar.gz"
 LINUX_NEO4J_URL = f"https://dist.neo4j.org/{LINUX_NEO4J_TAR_NAME}"
-JDK_DIR_NAME = "jdk-21.0.9"
+
+MACOS_JDK_TAR_NAME_X64 = "jdk-21_macos-x64_bin.tar.gz"
+MACOS_JDK_URL_X64 = (
+    f"https://download.oracle.com/java/21/latest/{MACOS_JDK_TAR_NAME_X64}"
+)
+MACOS_JDK_TAR_NAME_ARM64 = "jdk-21_macos-aarch64_bin.tar.gz"
+MACOS_JDK_URL_ARM64 = (
+    f"https://download.oracle.com/java/21/latest/{MACOS_JDK_TAR_NAME_ARM64}"
+)
+
 NEO4J_WINDOWS_SERVICE_NAME = "neo4j"
 
 NEO4J_GPG_KEY_URL = "https://debian.neo4j.com/neotechnology.gpg.key"
@@ -60,7 +68,7 @@ class ModelProvider(Enum):
     OLLAMA = "ollama"
 
     @classmethod
-    def parse(cls, raw: str) -> Self:
+    def parse(cls, raw: str) -> "ModelProvider":
         """
         Parse user-provided input (case-insensitive) and map it to a ModelProvider.
 

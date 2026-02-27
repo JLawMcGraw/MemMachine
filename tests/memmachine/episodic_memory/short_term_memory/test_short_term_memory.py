@@ -1,22 +1,24 @@
+import asyncio
+import re
+import string
 import uuid
 from datetime import UTC, datetime
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import pytest
 import pytest_asyncio
 
+from memmachine.common.api import EpisodeType
 from memmachine.common.configuration.episodic_config import (
     EpisodicMemoryConf,
 )
-from memmachine.common.episode_store import (
-    ContentType,
-    Episode,
-)
+from memmachine.common.episode_store import ContentType, Episode
 from memmachine.common.filter.filter_parser import parse_filter
 from memmachine.common.language_model import LanguageModel
 from memmachine.common.session_manager.session_data_manager import SessionDataManager
 from memmachine.episodic_memory.short_term_memory.short_term_memory import (
     ShortTermMemory,
+    ShortTermMemoryConsolidator,
     ShortTermMemoryParams,
 )
 
@@ -27,17 +29,17 @@ def create_test_episode(**kwargs):
         "uid": str(uuid.uuid4()),
         "sequence_num": 1,
         "session_key": "session1",
-        "episode_type": "message",
+        "episode_type": EpisodeType.MESSAGE,
         "content_type": ContentType.STRING,
         "content": "default content",
         "created_at": datetime.now(tz=UTC),
         "producer_id": "user1",
         "producer_role": "user",
         "produced_for_id": None,
-        "user_metadata": None,
+        "metadata": None,
     }
     defaults.update(kwargs)
-    return Episode(**defaults)
+    return Episode.model_validate(defaults)
 
 
 class MockShortTermMemoryDataManager(SessionDataManager):
@@ -57,10 +59,10 @@ class MockShortTermMemoryDataManager(SessionDataManager):
         self,
         session_key: str,
         summary: str,
-        seq: int,
-        num: int,
-    ):
-        self.data[session_key] = (summary, seq, num)
+        last_seq: int,
+        episode_num: int,
+    ) -> None:
+        self.data[session_key] = (summary, last_seq, episode_num)
 
     async def get_short_term_memory(self, session_key: str) -> tuple[str, int, int]:
         if session_key not in self.data:
@@ -100,12 +102,31 @@ class MockShortTermMemoryDataManager(SessionDataManager):
     async def get_sessions(self, filters: dict[str, object] | None = None) -> list[str]:
         return []
 
+    async def update_session_episodic_config(
+        self,
+        session_key: str,
+        enabled: bool | None = None,
+        long_term_memory_enabled: bool | None = None,
+        short_term_memory_enabled: bool | None = None,
+    ) -> None:
+        pass
+
 
 T = TypeVar("T")
 
 
 class MockLanguageModel(LanguageModel):
     """Mock implementation of LanguageModel for testing."""
+
+    def __init__(self):
+        self.call_count = 0
+
+    @staticmethod
+    def parse_summary(text: str) -> str:
+        m = re.search(r"summary:(\w+)", text)
+        prev_summary = m.group(1) if m else ""
+        messages = re.findall(r'"([^"]*)"', text)
+        return prev_summary + "".join(message[0] for message in messages)
 
     async def generate_response(
         self,
@@ -115,7 +136,15 @@ class MockLanguageModel(LanguageModel):
         tool_choice: str | dict[str, str] | None = None,
         max_attempts: int = 1,
     ) -> tuple[str, Any]:
-        return "summary", ""
+        prompt = user_prompt or ""
+        if len(prompt) > 10000:
+            raise ValueError("User prompt exceeds context window")
+        if "model error" in prompt:
+            raise RuntimeError("Simulated model error")
+        self.call_count += 1
+        await asyncio.sleep(0.1)
+        user_input = self.parse_summary(prompt)
+        return f"summary:{user_input}", ""
 
     async def generate_parsed_response(
         self,
@@ -124,7 +153,7 @@ class MockLanguageModel(LanguageModel):
         user_prompt: str | None = None,
         max_attempts: int = 1,
     ) -> T:
-        return "summary"
+        return cast(T, "summary")
 
 
 @pytest.fixture
@@ -192,14 +221,14 @@ class TestSessionMemoryPublicAPI:
 
         episodes, summary = await memory.get_short_term_memory_context(query="test")
         assert episodes == [episode1, episode2, episode3]
-        assert summary == "summary"
+        assert summary == "summary:HW!"
 
         # New episode push out the oldest one: episode1
         episode4 = create_test_episode(content="??")
         await memory.add_episodes([episode4])
         episodes, summary = await memory.get_short_term_memory_context(query="test")
-        assert episodes == [episode3, episode4]
-        assert summary == "summary"
+        assert summary == "summary:HW!"
+        assert episodes == [episode4]
 
     async def test_clear_memory(self, memory):
         """Test clearing the memory."""
@@ -231,18 +260,94 @@ class TestSessionMemoryPublicAPI:
         await memory.add_episodes([ep1, ep2, ep3])
         episodes, summary = await memory.get_short_term_memory_context(query="test")
         assert episodes == [ep1, ep2, ep3]
-        assert summary == "summary"
+        assert summary == "summary:abc"
         await memory.delete_episode(ep1.uid)
         await memory.delete_episode(ep2.uid)
         await memory.delete_episode(ep3.uid)
         episodes, summary = await memory.get_short_term_memory_context(query="test")
         assert episodes == []
-        assert summary == "summary"
+        assert summary == "summary:abc"
         assert len(episodes) == 0
         await memory.add_episodes([ep1, ep2, ep3])
         episodes, _ = await memory.get_short_term_memory_context(query="test")
         assert episodes == [ep1, ep2, ep3]
         assert len(episodes) == 3
+
+    async def test_summary_behavior(self, memory, mock_model):
+        chars = string.digits
+        msgs = [char * 5 for char in chars]
+        summaries = []
+        for msg in msgs:
+            ep = create_test_episode(content=msg)
+            await memory.add_episodes([ep])
+        summaries.append(await memory.get_summary())
+        sorted_summaries = [s for s in summaries if s]
+        expected = ["summary:01234567"]
+        assert sorted_summaries == expected
+        assert mock_model.call_count == 1
+
+    async def test_keep_summary_if_model_error(self, memory):
+        episodes = [create_test_episode(content="a" * 100)]
+        await memory.add_episodes(episodes)
+        assert await memory.get_summary() == "summary:a"
+        episodes = [create_test_episode(content="model error " * 100)]
+        await memory.add_episodes(episodes)
+        assert await memory.get_summary() == "summary:a"
+
+    async def test_get_will_wait_for_summary(self, memory, mock_model):
+        memory._max_message_len = 20
+        chars = string.digits
+        msgs = [char * 5 for char in chars]
+        summaries = set()
+        for msg in msgs:
+            ep = create_test_episode(content=msg)
+            await memory.add_episodes([ep])
+            summaries.add(await memory.get_summary())
+        sorted_summary = sorted([s for s in summaries if s])
+        assert sorted_summary == [
+            "summary:01234",
+            "summary:0123456",
+            "summary:012345678",
+            "summary:0123456789",
+        ]
+        assert mock_model.call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_summary_exceed_context_window(self, memory, mock_model):
+        chars = string.digits
+        msgs = [char * 2000 for char in chars]
+        for msg in msgs:
+            ep = create_test_episode(content=msg)
+            await memory.add_episodes([ep])
+        summary = await memory.get_summary()
+        assert summary == "summary:" + string.digits
+        # context window limit causes recursive splitting into 4 LLM calls
+        assert mock_model.call_count == 4
+
+    @pytest.mark.asyncio
+    async def test_summary_catch_up(self, mock_model, mock_data_manager):
+        params = ShortTermMemoryConsolidator.Params(
+            summary_user_prompt="User prompt: {episodes} {summary} {max_length}",
+            summary_system_prompt="System Prompt",
+            max_summary_length_words=100,
+            session_key="test_session",
+            model=mock_model,
+            data_manager=mock_data_manager,
+        )
+        consolidator = ShortTermMemoryConsolidator(params)
+
+        msgs = [char * 5 for char in string.digits]
+        for msg in msgs:
+            ep = create_test_episode(content=msg)
+            await consolidator.summarize([ep])
+
+        # Summarize should have returned immediately (non-blocking)
+        assert await consolidator.summary == ""
+
+        # Wait for the background worker to finish everything
+        await consolidator.wait_until_done()
+
+        assert await consolidator.summary == "summary:0123456789"
 
     async def test_close(self, memory):
         """Test closing the memory."""
@@ -267,7 +372,7 @@ class TestSessionMemoryPublicAPI:
         )
         assert len(episodes) == 3
         assert episodes == [ep1, ep2, ep3]
-        assert summary == "summary"
+        assert summary == "summary:abc"
 
         # Test with a tighter message length limit. Episodes are retrieved newest first.
         # length=7 (summary)
@@ -278,8 +383,8 @@ class TestSessionMemoryPublicAPI:
             query="test",
             max_message_length=19,
         )
-        assert len(episodes) == 2
-        assert episodes == [ep2, ep3]
+        assert len(episodes) == 1
+        assert episodes == [ep3]
 
         # Test with episode limit
         episodes, summary = await memory.get_short_term_memory_context(
@@ -295,13 +400,13 @@ class TestSessionMemoryPublicAPI:
             content="a" * 6,
             producer_id="user1",
             producer_role="user",
-            metadata={"type": "message"},
+            filterable_metadata={"type": "message"},
         )
         ep2 = create_test_episode(
             content="b" * 6,
             producer_id="user2",
             producer_role="assistant",
-            metadata={"type": "message", "category": "greeting"},
+            filterable_metadata={"type": "message", "category": "greeting"},
         )
         await memory.add_episodes([ep1, ep2])
 
@@ -366,3 +471,39 @@ class TestSessionMemoryPublicAPI:
         )
         assert len(episodes) == 2
         assert episodes == [ep1, ep2]
+
+        # != filter: exclude user1
+        filter_str = "producer_id != 'user1'"
+        filters = parse_filter(filter_str)
+        episodes, _ = await memory.get_short_term_memory_context(
+            "test", filters=filters
+        )
+        assert len(episodes) == 1
+        assert episodes == [ep2]
+
+        # In filter: match producer_role
+        filter_str = "producer_role IN ('user')"
+        filters = parse_filter(filter_str)
+        episodes, _ = await memory.get_short_term_memory_context(
+            "test", filters=filters
+        )
+        assert len(episodes) == 1
+        assert episodes == [ep1]
+
+        # IsNull filter: ep1 has no category
+        filter_str = "m.category IS NULL"
+        filters = parse_filter(filter_str)
+        episodes, _ = await memory.get_short_term_memory_context(
+            "test", filters=filters
+        )
+        assert len(episodes) == 1
+        assert episodes == [ep1]
+
+        # Not filter: NOT producer_id = 'user1'
+        filter_str = "NOT producer_id = 'user1'"
+        filters = parse_filter(filter_str)
+        episodes, _ = await memory.get_short_term_memory_context(
+            "test", filters=filters
+        )
+        assert len(episodes) == 1
+        assert episodes == [ep2]

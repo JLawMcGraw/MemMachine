@@ -4,13 +4,8 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from neo4j import AsyncGraphDatabase
-from sentence_transformers import CrossEncoder, SentenceTransformer
 from testcontainers.neo4j import Neo4jContainer
 
-from memmachine.common.embedder.sentence_transformer_embedder import (
-    SentenceTransformerEmbedder,
-    SentenceTransformerEmbedderParams,
-)
 from memmachine.common.episode_store import Episode
 from memmachine.common.filter.filter_parser import (
     And as FilterAnd,
@@ -19,11 +14,16 @@ from memmachine.common.filter.filter_parser import (
     Comparison as FilterComparison,
 )
 from memmachine.common.filter.filter_parser import (
-    Or as FilterOr,
+    In as FilterIn,
 )
-from memmachine.common.reranker.cross_encoder_reranker import (
-    CrossEncoderReranker,
-    CrossEncoderRerankerParams,
+from memmachine.common.filter.filter_parser import (
+    IsNull as FilterIsNull,
+)
+from memmachine.common.filter.filter_parser import (
+    Not as FilterNot,
+)
+from memmachine.common.filter.filter_parser import (
+    Or as FilterOr,
 )
 from memmachine.common.vector_graph_store.neo4j_vector_graph_store import (
     Neo4jVectorGraphStore,
@@ -33,12 +33,23 @@ from memmachine.episodic_memory.long_term_memory import (
     LongTermMemory,
     LongTermMemoryParams,
 )
+from tests.memmachine.conftest import (
+    is_docker_available,
+    requires_sentence_transformers,
+)
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture(scope="module")
 def embedder():
+    from sentence_transformers import SentenceTransformer
+
+    from memmachine.common.embedder.sentence_transformer_embedder import (
+        SentenceTransformerEmbedder,
+        SentenceTransformerEmbedderParams,
+    )
+
     return SentenceTransformerEmbedder(
         SentenceTransformerEmbedderParams(
             model_name="sentence-transformers/all-MiniLM-L6-v2",
@@ -51,9 +62,15 @@ def embedder():
 
 @pytest.fixture(scope="module")
 def reranker():
+    from sentence_transformers import CrossEncoder
+
+    from memmachine.common.reranker.cross_encoder_reranker import (
+        CrossEncoderReranker,
+        CrossEncoderRerankerParams,
+    )
+
     return CrossEncoderReranker(
         CrossEncoderRerankerParams(
-            model_name="cross-encoder/ms-marco-MiniLM-L6-v2",
             cross_encoder=CrossEncoder(
                 "cross-encoder/ms-marco-MiniLM-L6-v2",
             ),
@@ -63,6 +80,9 @@ def reranker():
 
 @pytest.fixture(scope="module")
 def neo4j_connection_info():
+    if not is_docker_available():
+        pytest.skip("Docker is not available")
+
     neo4j_username = "neo4j"
     neo4j_password = "password"
 
@@ -128,6 +148,7 @@ async def clear_long_term_memory(long_term_memory):
     yield
 
 
+@requires_sentence_transformers
 @pytest.mark.asyncio
 async def test_add_episodes(long_term_memory):
     all_episodes = await long_term_memory.get_matching_episodes()
@@ -175,6 +196,7 @@ async def test_add_episodes(long_term_memory):
     assert set(all_episodes) == set(episodes)
 
 
+@requires_sentence_transformers
 @pytest.mark.asyncio
 async def test_search(long_term_memory):
     now = datetime.now(tz=UTC)
@@ -219,7 +241,7 @@ async def test_search(long_term_memory):
             producer_id="Alice",
             producer_role="user",
             filterable_metadata={"project": "memmachine", "length": "short"},
-            user_metadata={"some_key": "some_value"},
+            metadata={"some_key": "some_value"},
         ),
         Episode(
             uid="episode2",
@@ -229,7 +251,7 @@ async def test_search(long_term_memory):
             producer_id="Bob",
             producer_role="user",
             filterable_metadata={"project": "other", "length": "short"},
-            user_metadata={"some_other_key": "some_other_value"},
+            metadata={"some_other_key": "some_other_value"},
         ),
         Episode(
             uid="episode3",
@@ -255,6 +277,15 @@ async def test_search(long_term_memory):
             producer_id="Charlie",
             producer_role="user",
             filterable_metadata={"project": "memmachine"},
+        ),
+        Episode(
+            uid="episode6",
+            session_key="search_session",
+            content="I wrote this test.",
+            created_at=now + timedelta(seconds=50),
+            producer_id="Edwin",
+            producer_role="user",
+            filterable_metadata={"project": "memmachine", "length": "short"},
         ),
     ]
     episodes += [
@@ -298,30 +329,66 @@ async def test_search(long_term_memory):
     )
 
     assert len(results) == 1
-    assert results[0].uid == "episode1"
+    assert results[0].uid == "episode1" or results[0].uid == "episode6"
 
     results = await long_term_memory.search(
         query="Who wrote the test?",
         num_episodes_limit=4,
+        score_threshold=-float("inf"),
     )
 
     assert len(results) == 4
     # Most relevant.
     assert "episode1" in [result.uid for result in results]
-
-    # The bunch of filler episodes should separate episode1 and episode2.
-    assert "episode2" not in [result.uid for result in results]
+    assert "episode6" in [result.uid for result in results]
 
     results = await long_term_memory.search(
         query="Who wrote the test?",
         num_episodes_limit=4,
+        expand_context=0,
+        score_threshold=-float("inf"),
+    )
+
+    assert len(results) == 4
+    # Most relevant.
+    assert "episode1" in [result.uid for result in results]
+    assert "episode6" in [result.uid for result in results]
+
+    results = await long_term_memory.search(
+        query="Who wrote the test?",
+        num_episodes_limit=4,
+        expand_context=3,
+        score_threshold=-float("inf"),
+    )
+
+    assert len(results) == 4
+    # Most relevant.
+    assert "episode1" in [result.uid for result in results] or "episode6" in [
+        result.uid for result in results
+    ]
+    # Relevant but first result consumes entire budget.
+    assert "episode1" not in [result.uid for result in results] or "episode6" not in [
+        result.uid for result in results
+    ]
+
+    results = await long_term_memory.search(
+        query="Who wrote the test?",
+        num_episodes_limit=4,
+        score_threshold=float("inf"),
+    )
+
+    assert len(results) == 0
+
+    results = await long_term_memory.search(
+        query="Who wrote the test?",
+        num_episodes_limit=10,
         property_filter=FilterComparison(
             field="m.project",
             op="=",
             value="memmachine",
         ),
     )
-    assert len(results) == 4
+    assert len(results) == 10
     assert "episode1" in [result.uid for result in results]
     assert "episode5" in [result.uid for result in results]
 
@@ -335,11 +402,13 @@ async def test_search(long_term_memory):
         ),
     )
 
-    assert len(results) == 2
+    assert len(results) == 3
     assert "episode1" in [result.uid for result in results]
     assert "episode2" in [result.uid for result in results]
+    assert "episode6" in [result.uid for result in results]
 
 
+@requires_sentence_transformers
 @pytest.mark.asyncio
 async def test_get_episodes(long_term_memory):
     now = datetime.now(tz=UTC)
@@ -373,7 +442,7 @@ async def test_get_episodes(long_term_memory):
             producer_id="LLM",
             producer_role="assistant",
             produced_for_id="Alice",
-            filterable_properties={"project": "history", "length": "short"},
+            filterable_metadata={"project": "history", "length": "short"},
         ),
     ]
 
@@ -384,6 +453,7 @@ async def test_get_episodes(long_term_memory):
     assert set(results) == {episodes[0], episodes[2]}
 
 
+@requires_sentence_transformers
 @pytest.mark.asyncio
 async def test_get_matching_episodes(long_term_memory):
     now = datetime.now(tz=UTC)
@@ -464,10 +534,8 @@ async def test_get_matching_episodes(long_term_memory):
     assert set(results) == {episodes[0], episodes[2]}
 
     results = await long_term_memory.get_matching_episodes(
-        property_filter=FilterComparison(
+        property_filter=FilterIsNull(
             field="m.length",
-            op="is_null",
-            value=None,
         )
     )
     assert len(results) == 1
@@ -508,10 +576,8 @@ async def test_get_matching_episodes(long_term_memory):
     assert set(results) == {episodes[0], episodes[1], episodes[2]}
 
     results = await long_term_memory.get_matching_episodes(
-        property_filter=FilterComparison(
+        property_filter=FilterIsNull(
             field="m.project",
-            op="is_null",
-            value=None,
         )
     )
     assert len(results) == 0
@@ -527,6 +593,7 @@ async def test_get_matching_episodes(long_term_memory):
     assert set(results) == {episodes[0], episodes[1]}
 
 
+@requires_sentence_transformers
 @pytest.mark.asyncio
 async def test_delete_episodes(long_term_memory):
     now = datetime.now(tz=UTC)
@@ -574,6 +641,7 @@ async def test_delete_episodes(long_term_memory):
     assert set(all_episodes) == {episodes[1]}
 
 
+@requires_sentence_transformers
 @pytest.mark.asyncio
 async def test_delete_matching_episodes(long_term_memory):
     now = datetime.now(tz=UTC)
@@ -614,10 +682,8 @@ async def test_delete_matching_episodes(long_term_memory):
     await long_term_memory.add_episodes(episodes)
 
     await long_term_memory.delete_matching_episodes(
-        property_filter=FilterComparison(
+        property_filter=FilterIsNull(
             field="m.length",
-            op="is_null",
-            value=None,
         )
     )
     all_episodes = await long_term_memory.get_matching_episodes()
@@ -645,3 +711,78 @@ async def test_delete_matching_episodes(long_term_memory):
     all_episodes = await long_term_memory.get_matching_episodes()
     assert len(all_episodes) == 1
     assert set(all_episodes) == {episodes[0]}
+
+
+@requires_sentence_transformers
+@pytest.mark.asyncio
+async def test_get_matching_episodes_extended_filters(long_term_memory):
+    now = datetime.now(tz=UTC)
+    episodes = [
+        Episode(
+            uid="episode1",
+            content="The mitochondria is the powerhouse of the cell.",
+            session_key="session1",
+            created_at=now,
+            producer_id="biology textbook",
+            producer_role="document",
+            sequence_num=123,
+            filterable_metadata={"project": "science", "length": "short"},
+            metadata={"chapter": 5, "page": 42},
+        ),
+        Episode(
+            uid="episode2",
+            content="Who was the first president of the United States?",
+            session_key="session2",
+            created_at=now,
+            producer_id="Alice",
+            producer_role="user",
+            sequence_num=0,
+            filterable_metadata={"project": "history", "category": "question"},
+        ),
+        Episode(
+            uid="episode3",
+            content="George Washington was the first president of the United States.",
+            session_key="session2",
+            created_at=now + timedelta(seconds=10),
+            producer_id="LLM",
+            producer_role="assistant",
+            produced_for_id="Alice",
+            filterable_metadata={"project": "history", "length": "short"},
+        ),
+    ]
+
+    await long_term_memory.add_episodes(episodes)
+
+    # != filter: producer_role != 'document' → episodes[1], episodes[2]
+    results = await long_term_memory.get_matching_episodes(
+        property_filter=FilterComparison(
+            field="producer_role",
+            op="!=",
+            value="document",
+        )
+    )
+    assert len(results) == 2
+    assert set(results) == {episodes[1], episodes[2]}
+
+    # In filter: producer_id IN ("Alice", "LLM") → episodes[1], episodes[2]
+    results = await long_term_memory.get_matching_episodes(
+        property_filter=FilterIn(
+            field="producer_id",
+            values=["Alice", "LLM"],
+        )
+    )
+    assert len(results) == 2
+    assert set(results) == {episodes[1], episodes[2]}
+
+    # Not filter: NOT m.project = 'science' → episodes[1], episodes[2]
+    results = await long_term_memory.get_matching_episodes(
+        property_filter=FilterNot(
+            expr=FilterComparison(
+                field="m.project",
+                op="=",
+                value="science",
+            )
+        )
+    )
+    assert len(results) == 2
+    assert set(results) == {episodes[1], episodes[2]}

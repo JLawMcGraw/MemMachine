@@ -32,6 +32,34 @@ class Neo4jConf(YamlSerializableMixin, PasswordMixin):
         default=False,
         description="Whether to force exact similarity search",
     )
+    range_index_creation_threshold: int | None = Field(
+        default=None,
+        description=(
+            "Minimum number of entities in a collection or relationship "
+            "required before Neo4j automatically creates a range index."
+        ),
+    )
+    vector_index_creation_threshold: int | None = Field(
+        default=None,
+        description=(
+            "Minimum number of entities in a collection or relationship "
+            "required before Neo4j automatically creates a vector index."
+        ),
+    )
+    max_connection_pool_size: int | None = Field(
+        default=None,
+        description=(
+            "Maximum number of connections to maintain in the connection pool. "
+            "Internal default is 100."
+        ),
+    )
+    connection_acquisition_timeout: float | None = Field(
+        default=None,
+        description=(
+            "Maximum time in seconds to wait for a connection from the pool. "
+            "Internal default is 60.0."
+        ),
+    )
 
     def get_uri(self) -> str:
         if self.uri:
@@ -60,6 +88,21 @@ class SqlAlchemyConf(YamlSerializableMixin, PasswordMixin):
         ),
     )
     db_name: str | None = Field(default=None, description="DB name")
+    pool_size: int | None = Field(
+        default=None,
+        description=(
+            "Number of persistent connections to maintain in the connection pool. "
+            "If set, the pool will keep up to this many open connections ready for use."
+        ),
+    )
+    max_overflow: int | None = Field(
+        default=None,
+        description=(
+            "Maximum number of temporary connections allowed above `pool_size` during "
+            "traffic spikes. These overflow connections are created on demand and "
+            "disposed of when no longer needed."
+        ),
+    )
 
     @property
     def schema_part(self) -> str:
@@ -108,7 +151,7 @@ class SqlAlchemyConf(YamlSerializableMixin, PasswordMixin):
 class SupportedDB(str, Enum):
     """Supported database providers."""
 
-    # <-- Add these annotations so mypy knows these attributes exist
+    # <-- Add these annotations so type checker knows these attributes exist
     conf_cls: type[Neo4jConf] | type[SqlAlchemyConf]
     dialect: str | None
     driver: str | None
@@ -126,7 +169,7 @@ class SupportedDB(str, Enum):
     ) -> Self:
         obj = str.__new__(cls, value)
         obj._value_ = value
-        obj.conf_cls = conf_cls  # mypy now knows these attributes exist
+        obj.conf_cls = conf_cls  # type checker now knows these attributes exist
         obj.dialect = dialect
         obj.driver = driver
         return obj

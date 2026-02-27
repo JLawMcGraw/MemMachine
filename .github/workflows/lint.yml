@@ -21,10 +21,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: astral-sh/ruff-action@v3.5.1
-      - uses: astral-sh/ruff-action@v3.5.1
+      - uses: astral-sh/ruff-action@v3
+        with:
+          version-file: "pyproject.toml"
+      - uses: astral-sh/ruff-action@v3
         with:
           args: "format --check --diff"
+          version-file: "pyproject.toml"
 
   ty-static-check:
     name: ty static check
@@ -46,4 +49,4 @@ jobs:
         run: uv lock --refresh && git diff --exit-code
 
       - name: Test with python ${{ matrix.python-version }}
-        run: uv run --frozen --all-extras ty check src
+        run: uv run --frozen --all-extras ty check src tests

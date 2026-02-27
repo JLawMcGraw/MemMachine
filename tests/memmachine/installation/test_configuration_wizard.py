@@ -60,9 +60,6 @@ def test_configuration_with_prompt(mock_input, conf_args):
         assert embedder.api_key.get_secret_value() == "api_key_value"
         assert embedder.base_url == "https://api.my-openai.com/v1"
         assert embedder.dimensions == 1536
-    prompt = config.prompt
-    assert "profile_prompt" in prompt.session
-    assert "profile_prompt" in prompt.profile
 
 
 @patch("builtins.input")
@@ -109,7 +106,9 @@ def test_configuration_wizard_aws_provider(mock_input, conf_args):
     assert len(embedders) == 1
     for embedder in embedders.values():
         assert embedder.region == "us-west-2"
+        assert embedder.aws_access_key_id is not None
         assert embedder.aws_access_key_id.get_secret_value() == "key"
+        assert embedder.aws_secret_access_key is not None
         assert embedder.aws_secret_access_key.get_secret_value() == "secret"
         assert embedder.aws_session_token is None
         assert embedder.model_id == "amazon.titan-embed-text-v3"
@@ -117,7 +116,9 @@ def test_configuration_wizard_aws_provider(mock_input, conf_args):
     assert len(models) == 1
     for model in models.values():
         assert model.region == "us-west-2"
+        assert model.aws_access_key_id is not None
         assert model.aws_access_key_id.get_secret_value() == "key"
+        assert model.aws_secret_access_key is not None
         assert model.aws_secret_access_key.get_secret_value() == "secret"
         assert model.aws_session_token is None
         assert model.model_id == "openai.gpt-oss-30b-1:0"

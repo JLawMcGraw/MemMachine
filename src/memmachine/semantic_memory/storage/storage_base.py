@@ -20,6 +20,8 @@ from memmachine.semantic_memory.semantic_model import (
 class SemanticStorage(ABC):
     """Base class for semantic storage backends."""
 
+    backend_name: str | None = None
+
     @abstractmethod
     async def startup(self) -> None:
         """Initialize the semantic storage connection."""
@@ -33,6 +35,11 @@ class SemanticStorage(ABC):
     @abstractmethod
     async def delete_all(self) -> None:
         """Delete all semantic features in the storage."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def reset_set_ids(self, set_ids: list[SetIdT]) -> None:
+        """Reset the set ids for the provided feature sets."""
         raise NotImplementedError
 
     @abstractmethod
@@ -177,4 +184,9 @@ class SemanticStorage(ABC):
         older_than: datetime | None = None,
     ) -> list[SetIdT]:
         """Return all set id's that match the specified filters."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_set_ids_starts_with(self, prefix: str) -> list[SetIdT]:
+        """Return all set id's that start with the specified prefix."""
         raise NotImplementedError

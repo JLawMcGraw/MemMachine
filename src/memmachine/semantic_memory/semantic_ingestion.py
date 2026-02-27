@@ -17,7 +17,7 @@ from memmachine.semantic_memory.semantic_llm import (
     llm_feature_update,
 )
 from memmachine.semantic_memory.semantic_model import (
-    ResourceRetriever,
+    ResourceRetrieverT,
     Resources,
     SemanticCategory,
     SemanticCommand,
@@ -43,7 +43,7 @@ class IngestionService:
 
         semantic_storage: InstanceOf[SemanticStorage]
         history_store: InstanceOf[EpisodeStorage]
-        resource_retriever: InstanceOf[ResourceRetriever]
+        resource_retriever: ResourceRetrieverT
         consolidated_threshold: int = 20
         debug_fail_loudly: bool = False
 
@@ -56,10 +56,17 @@ class IngestionService:
         self._debug_fail_loudly = params.debug_fail_loudly
 
     async def process_set_ids(self, set_ids: list[SetIdT]) -> None:
+        async def _run(set_id: SetIdT) -> None:
+            try:
+                await self._process_single_set(set_id)
+            except Exception:
+                logger.exception("Failed to process set_id %s", set_id)
+                raise
+
         logger.info("Starting ingestion processing for set ids: %s", set_ids)
 
         results = await asyncio.gather(
-            *[self._process_single_set(set_id) for set_id in set_ids],
+            *[_run(set_id) for set_id in set_ids],
             return_exceptions=True,
         )
 
@@ -68,11 +75,11 @@ class IngestionService:
             raise ExceptionGroup("Failed to process set ids", errors)
 
     async def _process_single_set(self, set_id: str) -> None:  # noqa: C901
-        resources = self._resource_retriever.get_resources(set_id)
+        resources = await self._resource_retriever(set_id)
 
         history_ids = await self._semantic_storage.get_history_messages(
             set_ids=[set_id],
-            limit=50,
+            limit=5,
             is_ingested=False,
         )
 
@@ -90,13 +97,22 @@ class IngestionService:
         if len(history_ids) == 0:
             return
 
-        raw_messages = await asyncio.gather(
-            *[self._history_store.get_episode(h_id) for h_id in history_ids],
-        )
+        async with asyncio.TaskGroup() as tg:
+            tasks = {
+                h_id: tg.create_task(self._history_store.get_episode(h_id))
+                for h_id in history_ids
+            }
 
-        if len(raw_messages) != len([m for m in raw_messages if m is not None]):
-            raise ValueError("Failed to retrieve messages. Invalid history_ids")
+        raw_messages = [tasks[h_id].result() for h_id in history_ids]
+        none_h_ids = [h_id for h_id, task in tasks.items() if task.result() is None]
 
+        if len(none_h_ids) != 0:
+            raise ValueError(
+                "Failed to retrieve messages. Invalid episode_ids exist for set_id "
+                f"{set_id}: {none_h_ids}"
+            )
+
+        raw_messages = [m for m in raw_messages if m is not None]
         messages = TypeAdapter(list[Episode]).validate_python(raw_messages)
 
         logger.info("Processing %d messages for set %s", len(messages), set_id)
@@ -111,8 +127,7 @@ class IngestionService:
                     )
 
                     raise ValueError(
-                        "Message ID is None for message %s",
-                        message.model_dump(),
+                        f"Message ID is None for message {message.model_dump()}"
                     )
 
                 filter_expr = And(
@@ -259,6 +274,13 @@ class IngestionService:
                 SemanticFeature.group_features_by_tag(features).values(),
             )
 
+            if self._consolidation_threshold > 0:
+                consolidation_sections = [
+                    section
+                    for section in consolidation_sections
+                    if len(section) >= self._consolidation_threshold
+                ]
+
             await asyncio.gather(
                 *[
                     self._deduplicate_features(
@@ -322,7 +344,7 @@ class IngestionService:
             ],
         )
         citation_ids = TypeAdapter(list[EpisodeIdT]).validate_python(
-            list(merged_citations),
+            list(set(merged_citations)),
         )
 
         async def _add_feature(f: LLMReducedFeature) -> None:

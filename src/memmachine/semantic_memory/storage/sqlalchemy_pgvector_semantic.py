@@ -25,6 +25,7 @@ from sqlalchemy import (
     or_,
     select,
     text,
+    union,
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -42,18 +43,11 @@ from sqlalchemy.sql import Delete, Select, func
 from memmachine.common.episode_store.episode_model import EpisodeIdT
 from memmachine.common.errors import InvalidArgumentError, ResourceNotFoundError
 from memmachine.common.filter.filter_parser import (
-    And as FilterAnd,
-)
-from memmachine.common.filter.filter_parser import (
-    Comparison as FilterComparison,
-)
-from memmachine.common.filter.filter_parser import (
     FilterExpr,
+    demangle_user_metadata_key,
+    normalize_filter_field,
 )
-from memmachine.common.filter.filter_parser import (
-    Or as FilterOr,
-)
-from memmachine.common.filter.sql_filter_util import parse_sql_filter
+from memmachine.common.filter.sql_filter_util import compile_sql_filter
 from memmachine.semantic_memory.semantic_model import SemanticFeature, SetIdT
 from memmachine.semantic_memory.storage.storage_base import (
     FeatureIdT,
@@ -91,7 +85,7 @@ class Feature(BaseSemanticStorage):
     id = mapped_column(Integer, primary_key=True)
 
     # Feature data
-    set_id = mapped_column(String, nullable=False)
+    set_id = mapped_column(String, nullable=False, index=True)
     semantic_category_id = mapped_column(String, nullable=False)
     tag_id = mapped_column(String, nullable=False)
     feature = mapped_column(String, nullable=False)
@@ -158,7 +152,7 @@ class SetIngestedHistory(BaseSemanticStorage):
     """Tracks which history messages have been processed for a set."""
 
     __tablename__ = "set_ingested_history"
-    set_id = mapped_column(String, primary_key=True)
+    set_id = mapped_column(String, primary_key=True, index=True)
     history_id = mapped_column(
         String,
         primary_key=True,
@@ -221,6 +215,9 @@ class SqlAlchemyPgVectorSemanticStorage(SemanticStorage):
             await session.execute(delete(SetIngestedHistory))
             await session.execute(delete(Feature))
             await session.commit()
+
+    async def reset_set_ids(self, set_ids: list[SetIdT]) -> None:
+        pass
 
     async def add_feature(
         self,
@@ -603,8 +600,11 @@ class SqlAlchemyPgVectorSemanticStorage(SemanticStorage):
                 vector_search_opts=vector_search_opts,
             )
             if filter_expr is not None:
-                clause = self._compile_feature_filter_expr(filter_expr, Feature)
-                working_stmt = working_stmt.where(clause)
+                clause = compile_sql_filter(
+                    filter_expr, self._resolve_feature_field_default
+                )
+                if clause is not None:
+                    working_stmt = working_stmt.where(clause)
             return working_stmt
 
         if k is not None or vector_search_opts is not None:
@@ -614,54 +614,36 @@ class SqlAlchemyPgVectorSemanticStorage(SemanticStorage):
 
         delete_stmt = stmt
         if filter_expr is not None:
-            clause = self._compile_feature_filter_expr(filter_expr, Feature)
-            delete_stmt = delete_stmt.where(clause)
+            clause = compile_sql_filter(
+                filter_expr, self._resolve_feature_field_default
+            )
+            if clause is not None:
+                delete_stmt = delete_stmt.where(clause)
 
         return delete_stmt
 
-    def _compile_feature_comparison_expr(
+    def _resolve_feature_field_default(
         self,
-        expr: FilterComparison,
-        table: type[Feature],
-    ) -> ColumnElement[bool] | None:
-        column, is_metadata = self._resolve_feature_field(table, expr.field)
-
-        return parse_sql_filter(
-            column=column,
-            is_metadata=is_metadata,
-            expr=expr,
-        )
-
-    def _compile_feature_filter_expr(
-        self,
-        expr: FilterExpr,
-        table: type[Feature],
-    ) -> ColumnElement[bool] | None:
-        if isinstance(expr, FilterComparison):
-            return self._compile_feature_comparison_expr(expr, table)
-
-        if isinstance(expr, FilterAnd):
-            left = self._compile_feature_filter_expr(expr.left, table)
-            right = self._compile_feature_filter_expr(expr.right, table)
-
-            return and_(left, right)
-
-        if isinstance(expr, FilterOr):
-            left = self._compile_feature_filter_expr(expr.left, table)
-            right = self._compile_feature_filter_expr(expr.right, table)
-
-            return or_(left, right)
-
-        raise TypeError(f"Unsupported filter expression type: {type(expr)!r}")
+        field: str,
+    ) -> (
+        tuple[MappedColumn[Any] | InstrumentedAttribute[Any] | ColumnElement[Any], bool]
+        | tuple[None, bool]
+    ):
+        return self._resolve_feature_field(Feature, field)
 
     @staticmethod
     def _resolve_feature_field(
         table: type[Feature],
         field: str,
     ) -> (
-        tuple[MappedColumn[Any] | InstrumentedAttribute[Any], bool] | tuple[None, bool]
+        tuple[MappedColumn[Any] | InstrumentedAttribute[Any] | ColumnElement[Any], bool]
+        | tuple[None, bool]
     ):
-        normalized = field
+        internal_name, is_user_property = normalize_filter_field(field)
+        if is_user_property:
+            key = demangle_user_metadata_key(internal_name)
+            return table.json_metadata[key], True
+
         field_mapping = {
             "set_id": table.set_id,
             "set": table.set_id,
@@ -676,11 +658,8 @@ class SqlAlchemyPgVectorSemanticStorage(SemanticStorage):
             "created_at": table.created_at,
             "updated_at": table.updated_at,
         }
-        if normalized in field_mapping:
-            return field_mapping[normalized], False
-        if normalized.startswith(("m.", "metadata.")):
-            key = normalized.split(".", 1)[1]
-            return table.json_metadata[key].as_string(), True
+        if internal_name in field_mapping:
+            return field_mapping[internal_name], False
         return None, False
 
     async def _load_feature_citations(
@@ -743,6 +722,20 @@ class SqlAlchemyPgVectorSemanticStorage(SemanticStorage):
             stmt = stmt.where(conditions[0])
         elif len(conditions) > 1:
             stmt = stmt.where(or_(*conditions))
+
+        async with self._create_session() as session:
+            result = await session.execute(stmt)
+            set_ids = result.scalars().all()
+
+        return TypeAdapter(list[SetIdT]).validate_python(set_ids)
+
+    async def get_set_ids_starts_with(self, prefix: str) -> list[SetIdT]:
+        stmt = union(
+            select(SetIngestedHistory.set_id).where(
+                SetIngestedHistory.set_id.startswith(prefix)
+            ),
+            select(Feature.set_id).where(Feature.set_id.startswith(prefix)),
+        )
 
         async with self._create_session() as session:
             result = await session.execute(stmt)

@@ -4,22 +4,15 @@ from collections.abc import Iterable
 from typing import cast
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, InstanceOf
+from pydantic import BaseModel, Field, InstanceOf, JsonValue
 
-from memmachine.common.data_types import FilterablePropertyValue
+from memmachine.common.data_types import PropertyValue
 from memmachine.common.embedder import Embedder
 from memmachine.common.episode_store import ContentType, Episode, EpisodeType
 from memmachine.common.filter.filter_parser import (
-    And as FilterAnd,
-)
-from memmachine.common.filter.filter_parser import (
-    Comparison as FilterComparison,
-)
-from memmachine.common.filter.filter_parser import (
     FilterExpr,
-)
-from memmachine.common.filter.filter_parser import (
-    Or as FilterOr,
+    map_filter_fields,
+    normalize_filter_field,
 )
 from memmachine.common.reranker import Reranker
 from memmachine.common.vector_graph_store import VectorGraphStore
@@ -102,7 +95,7 @@ class LongTermMemory:
                 ),
                 content=episode.content,
                 filterable_properties=cast(
-                    dict[str, FilterablePropertyValue],
+                    dict[str, PropertyValue],
                     {
                         key: value
                         for key, value in {
@@ -139,18 +132,49 @@ class LongTermMemory:
         query: str,
         *,
         num_episodes_limit: int,
+        expand_context: int = 0,
+        score_threshold: float = -float("inf"),
         property_filter: FilterExpr | None = None,
     ) -> list[Episode]:
-        declarative_memory_episodes = await self._declarative_memory.search(
+        scored_episodes = await self.search_scored(
             query,
-            max_num_episodes=num_episodes_limit,
-            property_filter=LongTermMemory._sanitize_property_filter(property_filter),
+            num_episodes_limit=num_episodes_limit,
+            expand_context=expand_context,
+            score_threshold=score_threshold,
+            property_filter=property_filter,
+        )
+        return [episode for _, episode in scored_episodes]
+
+    async def search_scored(
+        self,
+        query: str,
+        *,
+        num_episodes_limit: int,
+        expand_context: int = 0,
+        score_threshold: float = -float("inf"),
+        property_filter: FilterExpr | None = None,
+    ) -> list[tuple[float, Episode]]:
+        scored_declarative_memory_episodes = (
+            await self._declarative_memory.search_scored(
+                query,
+                max_num_episodes=num_episodes_limit,
+                expand_context=expand_context,
+                property_filter=LongTermMemory._sanitize_property_filter(
+                    property_filter
+                ),
+            )
         )
         return [
-            LongTermMemory._episode_from_declarative_memory_episode(
-                declarative_memory_episode,
+            (
+                score,
+                LongTermMemory._episode_from_declarative_memory_episode(
+                    declarative_memory_episode,
+                ),
             )
-            for declarative_memory_episode in declarative_memory_episodes
+            for score, declarative_memory_episode in (
+                scored_declarative_memory_episodes
+            )
+            if score >= score_threshold
         ]
 
     async def get_episodes(self, uids: Iterable[str]) -> list[Episode]:
@@ -275,7 +299,9 @@ class LongTermMemory:
             if LongTermMemory._FILTERABLE_METADATA_NONE_FLAG
             not in declarative_memory_episode.filterable_properties
             else None,
-            metadata=declarative_memory_episode.user_metadata,
+            metadata=cast(
+                "dict[str, JsonValue] | None", declarative_memory_episode.user_metadata
+            ),
         )
 
     _MANGLE_FILTERABLE_METADATA_KEY_PREFIX = "metadata."
@@ -306,27 +332,10 @@ class LongTermMemory:
         return LongTermMemory._sanitize_filter_expr(property_filter)
 
     @staticmethod
+    def _sanitize_field(field: str) -> str:
+        internal_name, _ = normalize_filter_field(field)
+        return internal_name
+
+    @staticmethod
     def _sanitize_filter_expr(expr: FilterExpr) -> FilterExpr:
-        if isinstance(expr, FilterComparison):
-            if expr.field.startswith("m."):
-                sanitized_field = LongTermMemory._mangle_filterable_metadata_key(
-                    expr.field.removeprefix("m.")
-                )
-            else:
-                sanitized_field = expr.field
-            return FilterComparison(
-                field=sanitized_field,
-                op=expr.op,
-                value=expr.value,
-            )
-        if isinstance(expr, FilterAnd):
-            return FilterAnd(
-                left=LongTermMemory._sanitize_filter_expr(expr.left),
-                right=LongTermMemory._sanitize_filter_expr(expr.right),
-            )
-        if isinstance(expr, FilterOr):
-            return FilterOr(
-                left=LongTermMemory._sanitize_filter_expr(expr.left),
-                right=LongTermMemory._sanitize_filter_expr(expr.right),
-            )
-        raise TypeError(f"Unsupported filter expression type: {type(expr)!r}")
+        return map_filter_fields(expr, LongTermMemory._sanitize_field)

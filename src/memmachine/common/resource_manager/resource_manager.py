@@ -192,7 +192,7 @@ class ResourceManagerImpl:
                     self._semantic_manager = SemanticResourceManager(
                         semantic_conf=self._conf.semantic_memory,
                         prompt_conf=self._conf.prompt,
-                        resource_manager=self,  # type: ignore[arg-type]
+                        resource_manager=self,
                         episode_storage=episode_storage,
                     )
         assert self._semantic_manager is not None
@@ -211,3 +211,37 @@ class ResourceManagerImpl:
         if ret is None:
             raise ValueError(f"MetricsFactory '{name}' could not be created.")
         return ret
+
+    @property
+    def embedder_manager(self) -> EmbedderManager:
+        """Return the embedder manager."""
+        return self._embedder_manager
+
+    @property
+    def language_model_manager(self) -> LanguageModelManager:
+        """Return the language model manager."""
+        return self._model_manager
+
+    @property
+    def reranker_manager(self) -> RerankerManager:
+        """Return the reranker manager."""
+        return self._reranker_manager
+
+    @property
+    def database_manager(self) -> DatabaseManager:
+        """Return the database manager."""
+        return self._database_manager
+
+    def save_config(self, path: str | None = None) -> None:
+        """
+        Save the current configuration to file.
+
+        This persists any runtime changes made to resources (embedders,
+        language models, etc.) back to the configuration file.
+
+        Args:
+            path: Optional path to save to. If None, saves to the original
+                  configuration file path.
+
+        """
+        self._conf.save(path)

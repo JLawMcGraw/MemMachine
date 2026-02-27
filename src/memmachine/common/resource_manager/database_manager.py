@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from asyncio import Lock
-from typing import Self
+from typing import Any, Self
 
 from neo4j import AsyncDriver, AsyncGraphDatabase
 from sqlalchemy import text
@@ -113,17 +113,37 @@ class DatabaseManager:
             if not conf:
                 raise ValueError(f"Neo4j config '{name}' not found.")
 
-            driver = AsyncGraphDatabase.driver(
-                conf.get_uri(),
-                auth=(conf.user, conf.password.get_secret_value()),
-            )
+            driver_kwargs: dict[str, Any] = {
+                "uri": conf.get_uri(),
+                "auth": (conf.user, conf.password.get_secret_value()),
+            }
+            if conf.max_connection_pool_size is not None:
+                driver_kwargs["max_connection_pool_size"] = (
+                    conf.max_connection_pool_size
+                )
+            if conf.connection_acquisition_timeout is not None:
+                driver_kwargs["connection_acquisition_timeout"] = (
+                    conf.connection_acquisition_timeout
+                )
+
+            driver = AsyncGraphDatabase.driver(**driver_kwargs)
             if validate:
                 await self.validate_neo4j_driver(name, driver)
             self.neo4j_drivers[name] = driver
-            params = Neo4jVectorGraphStoreParams(
-                driver=driver,
-                force_exact_similarity_search=conf.force_exact_similarity_search,
-            )
+            params_kwargs: dict[str, Any] = {
+                "driver": driver,
+                "force_exact_similarity_search": conf.force_exact_similarity_search,
+            }
+            if conf.range_index_creation_threshold is not None:
+                params_kwargs["range_index_creation_threshold"] = (
+                    conf.range_index_creation_threshold
+                )
+            if conf.vector_index_creation_threshold is not None:
+                params_kwargs["vector_index_creation_threshold"] = (
+                    conf.vector_index_creation_threshold
+                )
+
+            params = Neo4jVectorGraphStoreParams(**params_kwargs)
             self.graph_stores[name] = Neo4jVectorGraphStore(params)
             return driver
 
@@ -192,7 +212,16 @@ class DatabaseManager:
             if not conf:
                 raise ValueError(f"SQL config '{name}' not found.")
 
-            engine = create_async_engine(conf.uri, echo=False, future=True)
+            engine_kwargs = {
+                "echo": False,
+                "future": True,
+            }
+            if conf.pool_size is not None:
+                engine_kwargs["pool_size"] = conf.pool_size
+            if conf.max_overflow is not None:
+                engine_kwargs["max_overflow"] = conf.max_overflow
+
+            engine = create_async_engine(conf.uri, **engine_kwargs)
             if validate:
                 await self.validate_sql_engine(name, engine)
             self.sql_engines[name] = engine
