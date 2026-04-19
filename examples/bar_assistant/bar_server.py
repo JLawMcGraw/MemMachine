@@ -1,14 +1,17 @@
 # File: memmachine/examples/bar_assistant/bar_server.py
 
-import os
 import logging
-from dotenv import load_dotenv
-from query_constructor import BarQueryConstructor
-
-# Import the example server factory from parent directory
+import os
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Ensure local imports work when running from repository root (e.g., `python examples/bar_assistant/bar_server.py`).
+# Upstream's v2 reorganization removed the shared examples/example_server.py, so bar_assistant now vendors it locally.
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from dotenv import load_dotenv
+
 from example_server import app as base_app
+from query_constructor import BarQueryConstructor
 
 # Load environment variables from a .env file (e.g., for API keys)
 load_dotenv()

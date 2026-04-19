@@ -1,11 +1,11 @@
 # File: memmachine/examples/bar_assistant/query_constructor.py
 
-import sys
 import os
-from typing import Dict, Any
+import sys
+from typing import Any, Dict
 
-# Ensure we can import from the parent 'examples' directory to access MemMachine's base classes
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Vendored base class lives next to this file after the v2 workspace merge.
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from base_query_constructor import BaseQueryConstructor
 

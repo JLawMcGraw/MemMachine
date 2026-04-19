@@ -21,9 +21,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 WORKDIR /app
 
 # Copy dependency files (paths relative to build context: parent of both repos)
+# Upstream restructured src/memmachine -> packages/server/src/memmachine_server,
+# so only pyproject.toml, uv.lock, packages/, and README.md are needed for dep resolution.
 COPY memmachine/pyproject.toml memmachine/uv.lock ./
 COPY memmachine/packages/ packages/
-COPY memmachine/src/ src/
 COPY memmachine/README.md README.md
 
 # Determine whether to include GPU dependencies
@@ -34,9 +35,9 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${SCM_VERSION}
 # Install dependencies into a virtual environment, but NOT the project itself
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$GPU" = "true" ]; then \
-    uv sync --locked --no-install-project --no-editable --no-dev --extra gpu; \
+        uv sync --frozen --package memmachine-server --no-install-workspace --no-editable --no-dev --extra gpu; \
     else \
-    uv sync --locked --no-install-project --no-editable --no-dev; \
+        uv sync --frozen --package memmachine-server --no-install-workspace --no-editable --no-dev; \
     fi
 
 # Copy the full application source code
@@ -50,9 +51,9 @@ RUN chmod +x /app/entrypoint.sh
 # Install the project itself from the local source
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$GPU" = "true" ]; then \
-    uv sync --locked --no-editable --no-dev --extra gpu; \
+        uv sync --frozen --package memmachine-server --no-editable --no-dev --extra gpu; \
     else \
-    uv sync --locked --no-editable --no-dev; \
+        uv sync --frozen --package memmachine-server --no-editable --no-dev; \
     fi
 
 #
